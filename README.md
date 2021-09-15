@@ -27,11 +27,9 @@ salloc --gres=gpu:rtx8000:1 -c 16 --mem 48GB -N 4
 ### 4. Interactively Start Script
 
 Then Launch jobs with
+
 ```
-srun --jobid $SLURM_JOB_ID jobs/conda_with_context.sh [output_path_name] [path_to_conda_venv_activate_file]
+srun --jobid $SLURM_JOB_ID jobs/with_context.sh [[pip] or [conda]] [output_path_name] [path_to_conda_venv_activate_file]
 ```
 
-or with
-```
-srun --jobid $SLURM_JOB_ID jobs/pip_with_context.sh [output_path_name] [path_to_pip_venv_activate_file]
-```
+the first agrument after the script path can be either pip or conda according to the type of virtual environment being used.
