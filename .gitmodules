@@ -1,0 +1,6 @@
+[submodule "GAR"]
+	path = GAR
+	url = /home/mila/g/gagnonju/IteratedDecoding/GAR/
+[submodule "DPR"]
+	path = DPR
+	url = /home/mila/g/gagnonju/IteratedDecoding/DPR/
