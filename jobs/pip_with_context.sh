@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+set -e
+
 ######################################################################
 # Launches the script on the cluster interactively.
 #
@@ -11,7 +13,7 @@
 # ```
 ######################################################################
 
-ACTIVATION_PATH="/home/mila/g/gagnonju/condaless/bin"
+ACTIVATION_PATH="/home/mila/g/gagnonju/condaless/bin/activate"
 
 ######################################################################
 # Boilerplate to get the directory of the script.
@@ -36,7 +38,6 @@ fi
 if [[ ! -z $2 ]] ; then
 	ACTIVATION_PATH="$2"
 fi
-
 
 module load python/3.8
 echo "${LOG_FRMT}\$ACTIVATION_PATH: $ACTIVATION_PATH"

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -e
 
 ######################################################################
 # Launches the script on the cluster interactively.
@@ -50,5 +51,6 @@ echo "${LOG_FRMT}PL_TORCH_DISTRIBUTED_BACKEND: $PL_TORCH_DISTRIBUTED_BACKEND"
 
 # shellcheck disable=SC1091
 source "$ACTIVATION_PATH"
+
 # shellcheck disable=SC1091
 source "$LAUNCHER_PATH" "$1"
