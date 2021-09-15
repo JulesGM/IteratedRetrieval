@@ -15,4 +15,4 @@ SCRIPT_DIR="$(dirname "${SCRIPT_DIR[0]}")"
 source "$SCRIPT_DIR/check_args.sh" $@ 
 
 
-srun --jobid "$SLURM_JOBID" "$SCRIPT_DIR/with_context.py" $@
+srun --jobid "$SLURM_JOBID" "$SCRIPT_DIR/with_context.sh" $@
