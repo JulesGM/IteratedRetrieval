@@ -10,7 +10,12 @@ to also download the **required** submodules.
 
 ### 2. Requirements
 
-Install the requirements in `requirements.txt` in either a regular (pip) virtual environment or a conda one.
+ - Install the requirements in `requirements.txt` in either a regular (pip) virtual environment or a conda one.
+
+ - If you use conda, also install NCCL:
+```
+conda install -c conda-forge nccl
+```
 
 ### 3. Get Nodes
 
