@@ -1,0 +1,10 @@
+transformers==2.11.0
+rich
+spacy
+pytorch
+pytorch-lightning
+torchtext
+tqdm
+wandb
+tensorboard
+rouge-score
