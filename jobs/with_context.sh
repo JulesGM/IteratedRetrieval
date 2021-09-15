@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-#SBATCH --job-name="gloo-10"
-#SBATCH --gres=gpu:rtx8000:1
-#SBATCH -c 16
-#SBATCH --mem 48GB
-#SBATCH -N 4
 set -e
+
+echo "with_context.sh: ARGUMENTS: $@"
 
 ######################################################################
 # Launches the script on the cluster interactively.
@@ -15,11 +12,11 @@ set -e
 #
 # Call this script with 
 # ```
-# srun --jobid="$SLURM_JOB_ID" ./with_context.sh [output_folder_name] [[/path/to/conda_venv_activate.sh]]
+# srun --jobid="$SLURM_JOB_ID" ./with_context.sh [[conda] or [pip]] [output_folder_name] [[/path/to/conda_venv_activate.sh]]
 # ```
 ######################################################################
 
-export PL_TORCH_DISTRIBUTED_BACKEND=gloo
+# export PL_TORCH_DISTRIBUTED_BACKEND=gloo
 ACTIVATION_PATH="$HOME/base_activate.sh"
 # export NCCL_IB_DISABLE=1
 # export NCCL_P2P_DISABLE=1
@@ -27,48 +24,18 @@ ACTIVATION_PATH="$HOME/base_activate.sh"
 ######################################################################
 # Boilerplate to get the directory of the script.
 ######################################################################
-if [[ -n "$SLURM_JOBID" ]] ; then
-  #if we're in a slurm job:
-  PATH=($(scontrol show job $SLURM_JOBID | awk -F= '/Command=/{print $2}'))
-  SCRIPT_DIR="$(dirname "${PATH[0]}")"
-else
-  SOURCE="${BASH_SOURCE[0]}"
-  while [ -h "$SOURCE" ]; do 
-    # resolve $SOURCE until the file is no longer a symlink
-    DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
-    SOURCE="$(readlink "$SOURCE")"
-    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" 
-  done
-  SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
-fi
 
-######################################################################
-# Checking and Parsing Arguments.
-# $1 Should be "conda" or "pip".
-# $2 Should be the filename of the output directory.
-# $3 Should be the path to the conda or pip (basic python) virtual environment
-######################################################################
-if [[ -z "$1" ]] ; then
-  echo "\$1 needs to be either 'conda' or 'pip'."
-  exit 1
-fi
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do 
+  # resolve $SOURCE until the file is no longer a symlink
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" 
+done
+SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 
-if [[ "$1" == "-h" || "$1" == "--help" ]] ; then
-  echo \$1 Should be \"conda\" or \"pip\" according to the type of venv used
-  echo \$2 Should be the filename of the output directory.
-  echo \$3 Should be the path to the conda or pip \(basic python\) virtual environment.
-fi
-
-if [[ "$1" != "conda" && "$1" != "pip" ]] ; then 
-  echo "\$1 needs to be either 'conda' or 'pip'."
-  exit 1
-fi
-
-if [[ -z $2 ]] ; then
-	echo "{$LOG_FRMT}\$2 is empty. Should be the filename of the output directory."
-	exit 1;
-fi
-
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/check_args.sh" $@
 if [[ -n $3 ]] ; then
 	ACTIVATION_PATH="$3"
 fi
