@@ -4,3 +4,9 @@
 [submodule "DPR"]
 	path = DPR
 	url = /home/mila/g/gagnonju/IteratedDecoding/DPR/
+[submodule "/home/mila/g/gagnonju/IteratedDecoding/GAR"]
+	path = /home/mila/g/gagnonju/IteratedDecoding/GAR
+	url = https://github.com/JulesGM/GAR
+[submodule "/home/mila/g/gagnonju/IteratedDecoding/DPR"]
+	path = /home/mila/g/gagnonju/IteratedDecoding/DPR
+	url = https://github.com/JulesGM/DPR
