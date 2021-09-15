@@ -1,10 +1,11 @@
-transformers==2.11.0
-rich
-spacy
+colored_traceback
 pytorch
 pytorch-lightning
+rich
+rouge-score
+spacy
 torchtext
 tqdm
-wandb
 tensorboard
-rouge-score
+transformers==2.11.0
+wandb
