@@ -1,3 +1,8 @@
+The default backend uses NVIDIA NCCL. 
+There is another backend that uses Gloo (and also doesn't work.)
+The backend can be set to `gloo` at the top of `jobs/with_context.sh`,
+by uncommenting the appropriate line (PL_TORCH_DISTRIBUTED_BACKEND).
+
 ### 1. Pulling with Submodules
 
 First pull with 

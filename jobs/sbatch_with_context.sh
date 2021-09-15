@@ -3,7 +3,7 @@
 #SBATCH --gres=gpu:rtx8000:1
 #SBATCH -c 16
 #SBATCH --mem 48GB
-#SBATCH -N 4
+#SBATCH -N 10
 set -e
 
 
