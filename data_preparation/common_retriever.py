@@ -1,4 +1,5 @@
 # Standard library
+import collections
 import copy
 import glob
 import importlib
@@ -7,6 +8,9 @@ import os
 import pathlib
 import re
 import rich
+import time
+
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 
 # Third party
 import hydra
@@ -61,6 +65,9 @@ check_version("omegaconf", (2, 0, 1))
 LOGGER.info("All version checks passed.")
 
 
+###########################################################################
+# Main task
+###########################################################################
 def prep_cfg(cfg, verbose=False):
     ###########################################################################
     # Complete and validate CFG
@@ -79,7 +86,15 @@ def prep_cfg(cfg, verbose=False):
         LOGGER.info("CFG (after gpu  configuration):")
         LOGGER.info("%s", OmegaConf.to_yaml(cfg))
     
-
+    
+LoadDataReturn = collections.namedtuple(
+    "LoadDataReturn", 
+    [
+        "questions", 
+        "question_answers", 
+        "special_query_token", 
+    ]
+)
 def load_data(cfg):
     cfg = copy.copy(cfg)
     
@@ -100,22 +115,44 @@ def load_data(cfg):
     assert not qa_src.selector, qa_src.selector
     LOGGER.info("Using custom representation token selector")
     
-    retriever.selector = qa_src.selector
-
     for ds_item in qa_src.data:
         question, answers = ds_item.query, ds_item.answers
         questions.append(question)
         question_answers.append(answers)
         
-    return questions, question_answers, qa_src.special_query_token
+    return LoadDataReturn(
+        questions=questions, 
+        question_answers=question_answers, 
+        special_query_token=qa_src.special_query_token, 
+    )
 
+def load_passages(cfg):
+    cfg = copy.copy(cfg)        
+    prep_cfg(cfg)
+    ###########################################################################
+    # Prepare sources
+    ###########################################################################
+    LOGGER.info("Loading passages.")
+    all_passages = {}
+    id_prefixes = []
+    ctx_sources = []
+    for ctx_src in cfg.ctx_datatsets:
+        ctx_src = hydra.utils.instantiate(cfg.ctx_sources[ctx_src])
+        id_prefixes.append(ctx_src.id_prefix)
+        ctx_sources.append(ctx_src)
+
+    all_passages = {}
+    for ctx_src in ctx_sources:
+        ctx_src.load_data_to(all_passages)
+    LOGGER.info("Done loading passages.")
+
+    return all_passages, id_prefixes
 
 ###########################################################################
-# Make the Retriever
+# Build the retriever
 ###########################################################################
-def make_retriever(cfg):
-    cfg = copy.copy(cfg)
-        
+def make_retriever(cfg, id_prefixes):
+    cfg = copy.copy(cfg)        
     prep_cfg(cfg)
 
     ###########################################################################
@@ -165,23 +202,6 @@ def make_retriever(cfg):
     vector_size = model_to_load.get_out_size()
     LOGGER.info("Encoder vector_size=%d", vector_size)
 
-
-    ###########################################################################
-    # Prepare sources
-    ###########################################################################
-    LOGGER.info("Loading passages.")
-    id_prefixes = []
-    ctx_sources = []
-    for ctx_src in cfg.ctx_datatsets:
-        ctx_src = hydra.utils.instantiate(cfg.ctx_sources[ctx_src])
-        id_prefixes.append(ctx_src.id_prefix)
-        ctx_sources.append(ctx_src)
-
-    all_passages = {}
-    for ctx_src in ctx_sources:
-        ctx_src.load_data_to(all_passages)
-    LOGGER.info("Done loading passages.")
-
     
     ###########################################################################
     # Load Index & Prepare retriever
@@ -204,6 +224,35 @@ def make_retriever(cfg):
         index,
     )
     LOGGER.info(f"Loaded retriever.")
+            
+    #------------
+    ## Index all passages
+    #------------
+    ctx_files_patterns = cfg.encoded_ctx_files
+
+    LOGGER.info("ctx_files_patterns: %s", ctx_files_patterns)
+    if ctx_files_patterns:
+        assert len(ctx_files_patterns) == len(id_prefixes), (
+            "ctx len={} pref leb={}".format(
+            len(ctx_files_patterns), 
+            len(id_prefixes)
+            )
+        )
+    else:
+        assert index_path, (
+            "Either encoded_ctx_files or index_path parameter should be set."
+        )
+
+        
+    input_paths = []
+    path_id_prefixes = []
+    for i, pattern in enumerate(ctx_files_patterns):
+        pattern_files = glob.glob(pattern)
+        pattern_id_prefix = id_prefixes[i]
+        input_paths.extend(pattern_files)
+        path_id_prefixes.extend([pattern_id_prefix] * len(pattern_files))
+        
+      
     if index_path and index.index_exists(index_path):
         LOGGER.info("Index path: %s", index_path)
         retriever.index.deserialize(index_path)
@@ -216,49 +265,18 @@ def make_retriever(cfg):
         )
         if index_path:
             retriever.index.serialize(index_path)
-
-            
-    #------------
-    ## Index all passages
-    #------------
-    ctx_files_patterns = cfg.encoded_ctx_files
-
-    LOGGER.info("ctx_files_patterns: %s", ctx_files_patterns)
-    if ctx_files_patterns:
-        assert len(ctx_files_patterns) == len(
-            id_prefixes
-        ), "ctx len={} pref leb={}".format(
-            len(ctx_files_patterns), 
-            len(id_prefixes),
-        )
-    else:
-        assert (
-            index_path
-        ), "Either encoded_ctx_files or index_path parameter should be set."
-
-    input_paths = []
-    path_id_prefixes = []
-    for i, pattern in enumerate(ctx_files_patterns):
-        pattern_files = glob.glob(pattern)
-        pattern_id_prefix = id_prefixes[i]
-        input_paths.extend(pattern_files)
-        path_id_prefixes.extend([pattern_id_prefix] * len(pattern_files))
-        
-    if index_path and index.index_exists(index_path):
-        LOGGER.info("Index path: %s", index_path)
-        retriever.index.deserialize(index_path)
-    else:
-        LOGGER.info("Reading all passages data from files: %s", input_paths)
-        retriever.index_encoded_data(input_paths, index_buffer_sz, path_id_prefixes=path_id_prefixes)
-        if index_path:
-            retriever.index.serialize(index_path)
             
     LOGGER.info("Embeddings files id prefixes: %s", path_id_prefixes)
-    
-    return retriever, all_passages
+    return retriever
 
 
-def retrieve(retriever, all_passages, question, question_answers, special_query_token, n_docs):
+def retrieve(
+    retriever, 
+    all_passages, 
+    questions, 
+    special_query_token, 
+    n_docs,
+):
     if len(all_passages) == 0:
         raise RuntimeError("No passages data found.")
         
@@ -266,10 +284,14 @@ def retrieve(retriever, all_passages, question, question_answers, special_query_
     # Get top k results.
     ###########################################################################
     LOGGER.info("Using special token %s", special_query_token)
+    
+    start = time.monotonic()
     questions_tensor = retriever.generate_question_vectors(
         questions, 
-        query_token=question_answers,
+        query_token=special_query_token,
     )
+    delta = time.monotonic() - start
+    LOGGER.info(f"{len(questions) / delta} tok/sec for batch size {retriever.batch_size}")
     
     LOGGER.info(f"get_top_docs: Starting.")
     top_ids_and_scores = retriever.get_top_docs(
