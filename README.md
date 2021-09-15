@@ -1,4 +1,4 @@
-### 1. 
+### 1. Pulling with Submodules
 
 First pull with 
 
@@ -8,16 +8,18 @@ git clone git@github.com:JulesGM/IteratedRetrieval.git --recurse-submodules
 
 to also download the **required** submodules.
 
-### 2.
+### 2. Requirements
 
 Install the requirements in `requirements.txt` in either a regular (pip) virtual environment or a conda one.
 
-### 3.
+### 3. Get Nodes
 
 Then nodes on slurm with something like
 ```
 salloc --gres=gpu:rtx8000:1 -c 16 --mem 48GB -N 4
 ```
+
+### 4. Interactively Start Script
 
 Then Launch jobs with
 ```
