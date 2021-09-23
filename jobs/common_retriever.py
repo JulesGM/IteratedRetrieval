@@ -17,8 +17,10 @@ import hydra
 import rich
 
 # First Party
-BASE_PATH = pathlib.Path("/home/mila/g/gagnonju/DPR/")
+BASE_PATH = pathlib.Path("/home/mila/g/gagnonju/IteratedDecoding/DPR")
 CONF_PATH = BASE_PATH/"conf"
+
+import common_retriever
 
 os.chdir(BASE_PATH)
 import dpr.options
@@ -26,7 +28,6 @@ import dpr.utils.model_utils
 
 import dense_retriever
 import jules_validate_dense_retriever
-import common_retriever
 
 LOGGER = logging.getLogger(__name__)
 
