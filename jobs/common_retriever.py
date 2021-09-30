@@ -20,7 +20,6 @@ import rich
 BASE_PATH = pathlib.Path("/home/mila/g/gagnonju/IteratedDecoding/DPR")
 CONF_PATH = BASE_PATH/"conf"
 
-import common_retriever
 
 os.chdir(BASE_PATH)
 import dpr.options
@@ -58,7 +57,7 @@ def check_version(module_name, lb=None, ub=None):
         
 LOGGER.info("Checking versions...")        
 check_version("torch", (1, 5, 0))
-check_version("transformers", (3, 0, 0), (3, 1, 0))
+# check_version("transformers", (3, 0, 0), (3, 1, 0))
 check_version("tqdm", (4, 27, 0))
 check_version("spacy", (2, 1, 8))
 check_version("hydra", (1, 0, 0))
@@ -110,7 +109,8 @@ def load_data(cfg):
 
     ds_key = cfg.qa_dataset
     LOGGER.info("qa_dataset: %s", ds_key)
-
+    
+    LOGGER.info("load_data: hydra.utils.instantiate(cfg.datasets[ds_key])")
     qa_src = hydra.utils.instantiate(cfg.datasets[ds_key])
     qa_src.load_data()
     assert not qa_src.selector, qa_src.selector
@@ -133,7 +133,7 @@ def load_passages(cfg):
     ###########################################################################
     # Prepare sources
     ###########################################################################
-    LOGGER.info("Loading passages.")
+    LOGGER.info("load_passages: hydra.utils.instantiate")
     all_passages = {}
     id_prefixes = []
     ctx_sources = []
@@ -142,9 +142,11 @@ def load_passages(cfg):
         id_prefixes.append(ctx_src.id_prefix)
         ctx_sources.append(ctx_src)
 
+    LOGGER.info("load_passages: ctx_src.load_data_to")
     all_passages = {}
     for ctx_src in ctx_sources:
         ctx_src.load_data_to(all_passages)
+        
     LOGGER.info("Done loading passages.")
 
     return all_passages, id_prefixes
@@ -159,21 +161,24 @@ def make_retriever(cfg, id_prefixes):
     ###########################################################################
     # Prepare models
     ###########################################################################
+    LOGGER.info("make_retriever: dense_retriever.load_states_from_checkpoint")
     saved_state = dense_retriever.load_states_from_checkpoint(cfg.model_file)
     dpr.options.set_cfg_params_from_state(saved_state.encoder_params, cfg)
 
+    LOGGER.info("make_retriever: dense_retriever.init_biencoder_components")
     tensorizer, encoder, _ = dense_retriever.init_biencoder_components(
         cfg.encoder.encoder_model_type, cfg, inference_only=True
     )
 
     encoder_path = cfg.encoder_path
     if encoder_path:
-        LOGGER.info("Selecting encoder: %s", encoder_path)
+        LOGGER.info("make_retriever: Selecting encoder: %s", encoder_path)
         encoder = getattr(encoder, encoder_path)
     else:
-        LOGGER.info("Selecting standard question encoder")
+        LOGGER.info("make_retriever: Selecting standard question encoder")
         encoder = encoder.question_model
 
+    LOGGER.info("make_retriever: dpr.utils.model_utils.setup_for_distributed_mode")
     encoder, _ = dpr.utils.model_utils.setup_for_distributed_mode(
         encoder, 
         None, 
@@ -185,9 +190,8 @@ def make_retriever(cfg, id_prefixes):
     encoder.eval()
 
     # load weights from the model file
-    model_to_load = dpr.utils.model_utils.get_model_obj(encoder)
-    LOGGER.info("Loading saved model state ...")
-
+    LOGGER.info("make_retriever: dpr.utils.model_utils.get_model_obj")
+    model_to_load = dpr.utils.model_utils.get_model_obj(encoder)    
     encoder_prefix = (
         encoder_path if encoder_path else "question_model") + "."
     prefix_len = len(encoder_prefix)
@@ -199,6 +203,7 @@ def make_retriever(cfg, id_prefixes):
         if key.startswith(encoder_prefix)
     }
     # TODO: long term HF state compatibility fix
+    LOGGER.info("make_retriever: model_to_load.load_state_dict")
     model_to_load.load_state_dict(question_encoder_state, strict=False)
     vector_size = model_to_load.get_out_size()
     LOGGER.info("Encoder vector_size=%d", vector_size)
@@ -211,27 +216,30 @@ def make_retriever(cfg, id_prefixes):
     #------------
     ## Instantiate the index and create a retriever
     #------------
-    LOGGER.info(f"Loading index.")
+    LOGGER.info(
+        "make_retriever.: Loading index. " 
+        "hydra.utils.instantiate(cfg.indexers[cfg.indexer])"
+    )
     index = hydra.utils.instantiate(cfg.indexers[cfg.indexer])
-    LOGGER.info("Index class %s ", type(index))
+    LOGGER.info("make_retriever: Index class %s ", type(index))
     index_buffer_sz = index.buffer_size
     index.init_index(vector_size)
-    LOGGER.info(f"Done loading index.")
-    LOGGER.info(f"Loading retriever.")
+    LOGGER.info(f"make_retriever: Done loading index.")
+    LOGGER.info(f"make_retriever: dense_retriever.LocalFaissRetriever")
     retriever = dense_retriever.LocalFaissRetriever(
         encoder, 
         cfg.batch_size, 
         tensorizer, 
         index,
     )
-    LOGGER.info(f"Loaded retriever.")
+    LOGGER.info(f"make_retriever: Loaded retriever.")
             
     #------------
     ## Index all passages
     #------------
     ctx_files_patterns = cfg.encoded_ctx_files
 
-    LOGGER.info("ctx_files_patterns: %s", ctx_files_patterns)
+    LOGGER.info("make_retriever: ctx_files_patterns: %s", ctx_files_patterns)
     if ctx_files_patterns:
         assert len(ctx_files_patterns) == len(id_prefixes), (
             "ctx len={} pref leb={}".format(
@@ -244,7 +252,7 @@ def make_retriever(cfg, id_prefixes):
             "Either encoded_ctx_files or index_path parameter should be set."
         )
 
-        
+    
     input_paths = []
     path_id_prefixes = []
     for i, pattern in enumerate(ctx_files_patterns):
@@ -252,19 +260,23 @@ def make_retriever(cfg, id_prefixes):
         pattern_id_prefix = id_prefixes[i]
         input_paths.extend(pattern_files)
         path_id_prefixes.extend([pattern_id_prefix] * len(pattern_files))
-        
-      
+    
+    
+
     if index_path and index.index_exists(index_path):
         LOGGER.info("Index path: %s", index_path)
+        LOGGER.info("make_retriever: retriever.index.deserialize")  
         retriever.index.deserialize(index_path)
     else:
         LOGGER.info("Reading all passages data from files: %s", input_paths)
+        LOGGER.info("make_retriever: retriever.index_encoded_data")  
         retriever.index_encoded_data(
             input_paths, 
             index_buffer_sz, 
             path_id_prefixes=path_id_prefixes,
         )
         if index_path:
+            LOGGER.info("make_retriever: retriever.index.serialize")
             retriever.index.serialize(index_path)
             
     LOGGER.info("Embeddings files id prefixes: %s", path_id_prefixes)
@@ -278,6 +290,8 @@ def retrieve(
     special_query_token, 
     n_docs,
 ):
+    batch_size = len(questions)
+    
     if len(all_passages) == 0:
         raise RuntimeError("No passages data found.")
         
@@ -292,13 +306,25 @@ def retrieve(
         query_token=special_query_token,
     )
     delta = time.monotonic() - start
-    LOGGER.info(f"{len(questions) / delta} tok/sec for batch size {retriever.batch_size}")
-    
+    LOGGER.info(
+        f"Bert total time was {delta:0.2f}s. "
+        f"Bert has {batch_size / delta:0.2f} seq/sec for tensor "
+        f"{questions_tensor.size()} and inner batch size {retriever.batch_size}"
+    )
     LOGGER.info(f"get_top_docs: Starting.")
+    
+    start = time.monotonic()
     top_ids_and_scores = retriever.get_top_docs(
         questions_tensor.numpy(), 
         n_docs,
     )
+    delta = time.monotonic() - start
+    LOGGER.info(
+        f"Retrieval took {delta:0.2f} sec. "
+        f"Retrieval at {batch_size / delta:0.2f} input "
+        f"vectors/s with {n_docs} neighbors each."
+    )
+    
     LOGGER.info("get_top_docs: Done.")
     
     return top_ids_and_scores

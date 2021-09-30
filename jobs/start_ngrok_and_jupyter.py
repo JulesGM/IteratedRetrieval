@@ -1,8 +1,11 @@
 import abc
+import pathlib
 import os
+import re
 import subprocess
 import time
 import urllib3
+import yaml
 
 import fire
 import requests
@@ -13,6 +16,12 @@ NGROK_WAIT_TIME = 1
 JUPYTER_MAX_RETRIES = 5
 JUPYTER_WAIT_TIME = 1
 DEFAULT_NOTEBOOK_DIR = os.environ["HOME"]
+
+
+def safe_load_yaml(path):
+    with open(path) as fin:
+        return yaml.safe_load(fin)
+
 
 def clear():
     subprocess.check_output(["reset"])
@@ -32,6 +41,16 @@ class ContextBase(abc.ABC):
     def name(self):
         pass
 
+    @property
+    @abc.abstractmethod
+    def max_retries(self):
+        pass
+
+    @property
+    @abc.abstractmethod
+    def wait_time(self):
+        pass
+
     def maybe_start(self, *start_process_args, **start_process_kwargs):
         payload = self.is_online()
         if not payload:
@@ -44,34 +63,45 @@ class ContextBase(abc.ABC):
         if payload is None:
             payload = self.get_payload()
             if payload is None:
-                print(f"Failed to connect to {self.name.capitalize()} server.")
+                print(f"{self.name}.wait_until_payload: Failed to connect to {self.name.capitalize()} server.")
                 return 1
         return payload
 
-    def launch_process(self, command):
+    def start_process(self, *args, **kwargs):
         print(f"Starting a new {self.name} process.")
         subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                self.create_command(*args, **kwargs),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
+
+
+    def get_payload(self):
+        payload = None
+        for i in range(self.max_retries):
+            payload = self.is_online()
+            if payload:
+                break
+
+            print(f"{self.name}.get_payload: Waiting process to start.")
+            print(f"{self.name}.get_payload: sleeping for {self.wait_time}s")
+            time.sleep(self.wait_time)
+        return payload
 
     @abc.abstractmethod
     def is_online(self):
         pass
 
     @abc.abstractmethod
-    def get_payload(self):
-        pass
-    
-    @abc.abstractmethod
-    def start_process():
+    def create_command(self):
         pass
 
 
 class NgrokContext(ContextBase):
     name = "ngrok"
-    
+    max_retries = NGROK_START_MAX_RETRIES
+    wait_time = NGROK_WAIT_TIME
+
     def is_online(self):
         try: 
             r = requests.get("http://127.0.0.1:4040/api/tunnels")
@@ -86,31 +116,21 @@ class NgrokContext(ContextBase):
             return None
         return ngrok_tunnels[0]["public_url"]
 
-    def get_payload(self):
-        ngrok_url = None
-        for i in range(NGROK_START_MAX_RETRIES):
-            ngrok_url = self.ngrok_is_online()
-            if ngrok_url:
-                break
-            print("Waiting for ngrok to start.")
-            print("sleeping get_ngrok_url")
-            time.sleep(NGROK_WAIT_TIME)
-        return ngrok_url
-
-    def start_process(self, port):
-        super.start_process(["ngrok", "http", str(port)])
+    def create_command(self, port):
+        return ["ngrok", "http", str(port)]
 
 
-class JupyterContext(ContextBase):
-    name = "jupyter"
+class GUIContext(ContextBase, abc.ABC):
+    @staticmethod
+    @abc.abstractmethod
+    def format():
+        pass
 
-    def __init__(self, use_lab):
-        super().__init__()
-        self.use_lab = use_lab
 
-    def is_online(self):
+class JupyterMixin(GUIContext):
+    def _is_online(self, util_name):
         jupyter_output = subprocess.check_output(
-            ["jupyter", "lab" if self.use_lab else "notebook", "list"]
+            ["jupyter", util_name, "list"]
         )
         jupyter_lines = jupyter_output.decode().strip().split("\n")
         jupyter_token = None
@@ -120,28 +140,105 @@ class JupyterContext(ContextBase):
 
         return jupyter_token
 
-    def start_process(self, ngrok_port, notebook_dir):
-        super.start_process([
-                    "jupyter", 
-                    "lab" if self.use_lab else "notebook", 
-                    "--no-browser", 
-                    f"--port={ngrok_port}",
-                    f"--notebook-dir={notebook_dir}",
-        ])
+    def _create_command(self, util_name, ngrok_port, dir):
+        return [
+            "jupyter", 
+            util_name, 
+            "--no-browser", 
+            f"--port={ngrok_port}",
+            f"--notebook-dir={dir}",
+        ]
 
-    def get_payload(self):
-        jupyter_token = None
-        for _ in range(JUPYTER_MAX_RETRIES):
-            jupyter_token = self.is_online()
-            if jupyter_token:
-                break
-            print("Waiting for the jupyter notebook to start.")
-            print("sleeping get_jupyter_token")
-            time.sleep(JUPYTER_WAIT_TIME)
-        return jupyter_token
+    @staticmethod
+    def format(address, gui_payload):
+        return f"{address}/?token={gui_payload}"
 
 
-def main(ngrok_port=NGROK_PORT_DEFAULT, notebook_dir=DEFAULT_NOTEBOOK_DIR, lab=False):
+class NotebookContext(JupyterMixin):
+    name = "jupyter-notebook"
+    max_retries = JUPYTER_MAX_RETRIES
+    wait_time = JUPYTER_WAIT_TIME
+
+    def is_online(self):
+        return self._is_online("notebook")
+
+    def create_command(self, ngrok_port, notebook_dir):
+        return self._create_command("notebook", ngrok_port, notebook_dir)
+
+
+class LabContext(JupyterMixin):
+    name = "jupyter-lab"
+    max_retries = JUPYTER_MAX_RETRIES
+    wait_time = JUPYTER_WAIT_TIME
+
+    def is_online(self):
+        return self._is_online("lab")
+
+    def create_command(self, ngrok_port, notebook_dir):
+        return self._create_command("lab", ngrok_port, notebook_dir)
+
+
+class CodeServerContext(GUIContext):
+    name = "code-server"
+    max_retries = JUPYTER_MAX_RETRIES
+    wait_time = JUPYTER_WAIT_TIME
+    config_path = pathlib.Path(
+        os.environ["HOME"]
+    ) / ".config/code-server/config.yaml"
+
+    def is_online(self):
+        output = subprocess.check_output(
+            ["ps", "-o", "cmd="]
+        )
+
+        lines = output.decode().strip().split("\n")
+        print(lines)
+        
+        token = None
+        matches = [re.match(r".*node.*code\-server.*", line) for line in lines]
+        print(matches)
+        print()
+        if any(matches):
+            token = safe_load_yaml(self.config_path)["password"]
+        return token
+
+
+    def create_command(self, notebook_dir):
+        return ["code-server", notebook_dir]
+
+    @staticmethod
+    def format(address, gui_payload):
+        return f"{address} \"{gui_payload}\""
+
+
+
+def main(ngrok_port=NGROK_PORT_DEFAULT, notebook_dir=DEFAULT_NOTEBOOK_DIR, gui="code-server"):
+    print(f"{gui = }")
+
+    guis = {
+        "notebook": dict(
+            init=NotebookContext, 
+            init_args=(), 
+            init_kwargs=dict(),
+            start_process_args=(ngrok_port, notebook_dir),
+            start_process_kwargs=dict(),
+        ),
+        "lab": dict(
+            init=LabContext, 
+            init_args=(), 
+            init_kwargs=dict(),
+            start_process_args=(ngrok_port, notebook_dir),
+            start_process_kwargs=dict(),
+        ),
+        "code-server": dict(
+            init=CodeServerContext, 
+            init_args=(), 
+            init_kwargs=dict(),
+            start_process_args=(notebook_dir,),
+            start_process_kwargs=dict(),
+        )
+    }
+
     configs = dict(
         ngrok=dict(
             init=NgrokContext, 
@@ -150,21 +247,19 @@ def main(ngrok_port=NGROK_PORT_DEFAULT, notebook_dir=DEFAULT_NOTEBOOK_DIR, lab=F
             start_process_args=(ngrok_port,),
             start_process_kwargs=dict(),
         ),
-        jupyter=dict(
-            init=JupyterContext, 
-            init_args=(lab,), 
-            init_kwargs=dict(),
-            start_process_args=(ngrok_port, notebook_dir),
-            start_process_kwargs=dict(),
-        ),
+        gui=guis[gui],
     )
+    
     payloads = dict()
     contexts = dict()
 
     # Init and maybe start
     for name, config in configs.items():
         # Init
-        contexts[name] = config["init"](*config["init_args"])
+        contexts[name] = config["init"](
+            *config["init_args"], 
+            **config["init_kwargs"]
+        )
         payloads[name] = contexts[name].maybe_start(
             *config["start_process_args"], 
             **config["start_process_kwargs"],
@@ -175,9 +270,8 @@ def main(ngrok_port=NGROK_PORT_DEFAULT, notebook_dir=DEFAULT_NOTEBOOK_DIR, lab=F
         payloads[name] = contexts[name].wait_until_payload(payload)
 
     # Put things together
-    ngrok_url = payloads["ngrok"]
-    jupyter_token = payloads["jupyter"]
-    print(f"\n{ngrok_url}/?token={jupyter_token}")
+    output = contexts["gui"].format(payloads["ngrok"], payloads["gui"])
+    print(f"\n{output}")
     
 
 if __name__ == "__main__":

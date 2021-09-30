@@ -1,7 +1,6 @@
 """
 
 """
-import asyncio
 import concurrent.futures
 from pathlib import Path
 import os
@@ -10,6 +9,8 @@ import shlex
 import subprocess
 import time
 
+
+import colored_traceback.auto
 import fire
 import rich
 
@@ -50,9 +51,10 @@ def extract_number(path):
         number = int(matches.group(1))
         return number
 
+
 def model_output_paths_and_targets(directory):
     model_output_paths = check_is_truthy(
-        check_all_exist(directory.glob("val_predictions*.txt"))
+        check_all_exist(directory.glob("val_predictions-*.txt"))
     )
     model_output_paths.sort(key=extract_number, reverse=True)
     
@@ -114,63 +116,10 @@ def main_threads(directory):
             future.wait()
 
     rich.print("[green bold]All done!")
-                
-
-###############################################################################
-# Coroutine Specific
-###############################################################################
-async def run(cmd):
-    text_cmd = shlex.join(cmd)
-    print("{text_cmd}")
-    
-    proc = await asyncio.create_subprocess_shell(
-        text_cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE)
-
-    stdout, stderr = await proc.communicate()
-    return stdout.decode(), stderr.decode()
-
-
-async def action_asyncio(sem, our_output, command_flags):
-    rich.print(f"[yellow]Stacking {our_output}")
-    async with sem:
-        rich.print(f"[green]Starting {our_output}")
-        await run([
-                "python", "-m", "rouge_score.rouge"
-        ] + command_flags)
-        rich.print(f"[blue]Done with {our_output}")
-
-
-async def main_asyncio(directory):
-    directory = Path(directory)
-    model_output_paths, targets = model_output_paths_and_targets(directory)
-    sem = asyncio.Semaphore(os.cpu_count())
-
-    tasks = []
-    for model_output_path in model_output_paths:
-        maybe_command_flags, our_output = prep_command(
-                model_output_path, 
-                directory,
-                targets,
-            )
-        if maybe_command_flags:
-            tasks.append(asyncio.create_task(
-                action_asyncio(
-                    sem, 
-                    our_output, 
-                    maybe_command_flags,
-                ))
-            )
-        
-    for task in tasks:
-        await task
-
-    rich.print("[green bold]All done.")
+               
 
 
 if __name__ == "__main__":
     start = time.monotonic()
     fire.Fire(main_threads)
-    # asyncio.run(main_asyncio())
     rich.print(f"[bold red]Total time: {time.monotonic() - start}")
