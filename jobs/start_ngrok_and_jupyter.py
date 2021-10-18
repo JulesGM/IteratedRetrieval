@@ -10,13 +10,15 @@ import yaml
 import fire
 import requests
 
+SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()
+
 NGROK_PORT_DEFAULT = 8889
 NGROK_START_MAX_RETRIES = 15
 NGROK_WAIT_TIME = 1
 JUPYTER_MAX_RETRIES = 5
 JUPYTER_WAIT_TIME = 1
-DEFAULT_NOTEBOOK_DIR = os.environ["HOME"]
-
+DEFAULT_NOTEBOOK_DIR = SCRIPT_DIR.parent  # Assumes the script is at PROJECT_ROOT/jobs/here.py
+DEFAULT_GUI = "lab"
 
 def safe_load_yaml(path):
     with open(path) as fin:
@@ -212,7 +214,7 @@ class CodeServerContext(GUIContext):
 
 
 
-def main(ngrok_port=NGROK_PORT_DEFAULT, notebook_dir=DEFAULT_NOTEBOOK_DIR, gui="code-server"):
+def main(ngrok_port=NGROK_PORT_DEFAULT, notebook_dir=DEFAULT_NOTEBOOK_DIR, gui=DEFAULT_GUI):
     print(f"{gui = }")
 
     guis = {
