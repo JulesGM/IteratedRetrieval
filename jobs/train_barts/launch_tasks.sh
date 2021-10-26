@@ -44,7 +44,8 @@ source "$SCRIPT_DIR/check_parse_args.sh" "$@"
 ###############################################################################
 # Logging stuff
 ###############################################################################
-OUTPUT_FOLDER="$(realpath "${SCRIPT_DIR}/../GAR/gar/outputs/${ARG_OUTPUT_FILENAME}")"
+ROOT="$(realpath "$SCRIPT_DIR/../../")"
+OUTPUT_FOLDER="$(realpath "${ROOT}/GAR/gar/outputs/${ARG_OUTPUT_FILENAME}")"
 TEE_TARGET="${OUTPUT_FOLDER}/console.txt"
 OUTPUT_SAVE_PATH="${OUTPUT_FOLDER}/command_line_arguments.txt"
 
@@ -66,9 +67,9 @@ if [[ $ARG_BACKEND == "horovod" ]] ; then
     # spellcheck disable=SC1090
     source "$ARG_ACTIVATION_PATH"
 
-    ###############################################################################
+    ###########################################################################
     # Populate the node list
-    ###############################################################################
+    ###########################################################################
     # IFS="," read -r -a GPUS <<< "$SLURM_JOB_GPUS"
     # NGPUS="${#GPUS}"
     # NNODES="$SLURM_NNODES"

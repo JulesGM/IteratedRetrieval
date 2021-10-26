@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import rich
 import time
+import sys
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -33,16 +34,19 @@ import transformers
 # First Party
 import iterated_utils as utils
 
-ROOT_PATH = SCRIPT_DIR.parent
+ROOT_PATH = SCRIPT_DIR.parent.parent
 DPR_PATH = ROOT_PATH  / "DPR"
 CONF_PATH = DPR_PATH / "conf"
-os.chdir(DPR_PATH)
+sys.path.insert(0, str(DPR_PATH))
+
 import dpr.options
 import dpr.utils.model_utils
 import dense_retriever
-
 import jules_validate_dense_retriever
+
+sys.path.insert(0, str(ROOT_PATH / "GAR" / "gar"))              
 import utils_gen
+
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.info(f"(Re)loaded {Path(__file__).name}")
@@ -150,6 +154,28 @@ def load_data(cfg):
         question_answers=question_answers,
         special_query_token=qa_src.special_query_token,
     )
+
+
+def build_args(root_path):
+    DPR_CONF_PATH = root_path / "DPR" / "conf"
+    
+    try:
+        hydra.initialize_config_dir(config_dir=str(DPR_CONF_PATH))
+    except ValueError as err:
+        message = (
+            "GlobalHydra is already initialized, call "
+            "GlobalHydra.instance().clear() if you want to re-initialize"
+        )
+        if message not in err.args[0]:
+            raise err
+
+
+    dpr_cfg = hydra.compose(
+        config_name="dense_retriever",
+        overrides=["out_file=/tmp/"],
+    )
+
+    return dpr_cfg
 
 
 def load_passages(cfg):

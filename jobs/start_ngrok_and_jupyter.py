@@ -1,3 +1,4 @@
+#! /usr/bin/env python3
 import abc
 import pathlib
 import os
@@ -11,13 +12,14 @@ import fire
 import requests
 
 SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
 NGROK_PORT_DEFAULT = 8889
 NGROK_START_MAX_RETRIES = 15
 NGROK_WAIT_TIME = 1
 JUPYTER_MAX_RETRIES = 5
 JUPYTER_WAIT_TIME = 1
-DEFAULT_NOTEBOOK_DIR = SCRIPT_DIR.parent  # Assumes the script is at PROJECT_ROOT/jobs/here.py
+DEFAULT_NOTEBOOK_DIR = PROJECT_ROOT  # Assumes the script is at PROJECT_ROOT/jobs/here.py
 DEFAULT_GUI = "lab"
 
 def safe_load_yaml(path):
@@ -53,20 +55,27 @@ class ContextBase(abc.ABC):
     def wait_time(self):
         pass
 
+    class _FailedGettingPayload:
+        pass
+    failed_getting_payload = _FailedGettingPayload()
+
+    def payload_is_ok(self, payload):
+        return payload is not self.failed_getting_payload
+
     def maybe_start(self, *start_process_args, **start_process_kwargs):
         payload = self.is_online()
-        if not payload:
+        if not self.payload_is_ok(payload):
             self.start_process(*start_process_args, **start_process_kwargs)
         else:
             print(f"There is already a {self.name} process.")
         return payload
 
     def wait_until_payload(self, payload):
-        if payload is None:
-            payload = self.get_payload()
-            if payload is None:
+        if not self.payload_is_ok(payload):
+            payload = self._get_payload()
+            if not self.payload_is_ok(payload):
                 print(f"{self.name}.wait_until_payload: Failed to connect to {self.name.capitalize()} server.")
-                return 1
+                return self.failed_getting_payload
         return payload
 
     def start_process(self, *args, **kwargs):
@@ -77,17 +86,16 @@ class ContextBase(abc.ABC):
                 stderr=subprocess.DEVNULL,
             )
 
-
-    def get_payload(self):
-        payload = None
-        for i in range(self.max_retries):
+    def _get_payload(self):
+        payload = self.failed_getting_payload
+        for _ in range(self.max_retries):
             payload = self.is_online()
-            if payload:
+            if self.payload_is_ok(payload):
                 break
-
             print(f"{self.name}.get_payload: Waiting process to start.")
             print(f"{self.name}.get_payload: sleeping for {self.wait_time}s")
             time.sleep(self.wait_time)
+        
         return payload
 
     @abc.abstractmethod
@@ -111,11 +119,11 @@ class NgrokContext(ContextBase):
             requests.exceptions.ConnectionError, 
             urllib3.exceptions.NewConnectionError,
             ):
-            return None
+            return self.failed_getting_payload
         ngrok_info = r.json()
         ngrok_tunnels = ngrok_info["tunnels"]
         if len(ngrok_tunnels) < 1:
-            return None
+            return self.failed_getting_payload
         return ngrok_tunnels[0]["public_url"]
 
     def create_command(self, port):
@@ -135,7 +143,7 @@ class JupyterMixin(GUIContext):
             ["jupyter", util_name, "list"]
         )
         jupyter_lines = jupyter_output.decode().strip().split("\n")
-        jupyter_token = None
+        jupyter_token = self.failed_getting_payload
         if len(jupyter_lines) > 1:
             assert len(jupyter_lines) == 2, f"\"{jupyter_lines}\""
             jupyter_token = jupyter_lines[1].split()[0].split("=", 1)[1]
@@ -165,7 +173,9 @@ class NotebookContext(JupyterMixin):
         return self._is_online("notebook")
 
     def create_command(self, ngrok_port, notebook_dir):
-        return self._create_command("notebook", ngrok_port, notebook_dir)
+        return self._create_command(
+            "notebook", ngrok_port, notebook_dir
+        )
 
 
 class LabContext(JupyterMixin):
@@ -214,8 +224,11 @@ class CodeServerContext(GUIContext):
 
 
 
-def main(ngrok_port=NGROK_PORT_DEFAULT, notebook_dir=DEFAULT_NOTEBOOK_DIR, gui=DEFAULT_GUI):
+def main(gui=DEFAULT_GUI, ngrok_port=NGROK_PORT_DEFAULT, notebook_dir=DEFAULT_NOTEBOOK_DIR):
     print(f"{gui = }")
+    print(f"{ngrok_port = }")
+    print(f"{notebook_dir = }")
+    print(f"")
 
     guis = {
         "notebook": dict(
@@ -270,6 +283,8 @@ def main(ngrok_port=NGROK_PORT_DEFAULT, notebook_dir=DEFAULT_NOTEBOOK_DIR, gui=D
     # Wait until payload
     for name, payload in payloads.items():
         payloads[name] = contexts[name].wait_until_payload(payload)
+        if not contexts[name].payload_is_ok(payloads[name]):
+            raise RuntimeError("Payload failed: {name}")
 
     # Put things together
     output = contexts["gui"].format(payloads["ngrok"], payloads["gui"])

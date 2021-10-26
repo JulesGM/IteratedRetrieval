@@ -94,14 +94,15 @@ def action_threads(our_output, command_flags):
     subprocess.check_call(full_cmd)
 
     rich.print(f"[blue]Done with {our_output}")
-    
 
-def main_threads(directory):
+
+def main(directory, max_threads):
     directory = Path(directory)
+    assert directory.exists(), f"\nPath doesn't exist:\n{directory = }"
     model_output_paths, targets = model_output_paths_and_targets(directory)
 
     futures = []
-    with concurrent.futures.ThreadPoolExecutor() as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_threads) as pool:
         for model_output_path in model_output_paths:
             maybe_command_flags, our_output = prep_command(
                 model_output_path, directory, targets
@@ -121,5 +122,5 @@ def main_threads(directory):
 
 if __name__ == "__main__":
     start = time.monotonic()
-    fire.Fire(main_threads)
+    fire.Fire(main)
     rich.print(f"[bold red]Total time: {time.monotonic() - start}")
