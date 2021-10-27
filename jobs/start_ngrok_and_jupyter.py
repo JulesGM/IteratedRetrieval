@@ -223,7 +223,6 @@ class CodeServerContext(GUIContext):
         return f"{address} \"{gui_payload}\""
 
 
-
 def main(gui=DEFAULT_GUI, ngrok_port=NGROK_PORT_DEFAULT, notebook_dir=DEFAULT_NOTEBOOK_DIR):
     print(f"{gui = }")
     print(f"{ngrok_port = }")

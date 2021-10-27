@@ -9,7 +9,6 @@ import shlex
 import subprocess
 import time
 
-
 import colored_traceback.auto
 import fire
 import rich

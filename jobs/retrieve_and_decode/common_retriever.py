@@ -7,7 +7,7 @@ import glob
 import importlib
 import logging
 import os
-import pathlib
+from pathlib import Path
 try:
     import ujson as json
 except ImportError:
@@ -15,21 +15,20 @@ except ImportError:
     
 from pathlib import Path
 import re
-import rich
 import time
+from typing import *
 import sys
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Third party
+import beartype
 import faiss
 import hydra
-import jsonlines
 import numpy as np
 import omegaconf
-import rich
 import torch
-import transformers
+# import transformers
 
 # First Party
 import iterated_utils as utils
@@ -41,12 +40,13 @@ sys.path.insert(0, str(DPR_PATH))
 
 import dpr.options
 import dpr.utils.model_utils
+import dpr.indexer.faiss_indexers
 import dense_retriever
+print(dense_retriever.__file__)
 import jules_validate_dense_retriever
 
-sys.path.insert(0, str(ROOT_PATH / "GAR" / "gar"))              
-import utils_gen
-
+# sys.path.insert(0, str(ROOT_PATH / "GAR" / "gar"))              
+# import utils_gen
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.info(f"(Re)loaded {Path(__file__).name}")
@@ -338,12 +338,13 @@ def make_retriever(cfg, id_prefixes):
     return retriever
 
 
+# Unsure about these types
 def retrieve(
-    retriever,
-    all_passages,
-    questions,
-    special_query_token,
-    n_docs,
+    retriever: dense_retriever.LocalFaissRetriever,
+    all_passages: Dict[str, str],
+    questions: List[str],
+    special_query_token: Optional[str],
+    n_docs: int,
 ):
     batch_size = len(questions)
 
@@ -378,6 +379,7 @@ def retrieve(
         f"Retrieval at {batch_size / delta:0.2f} input "
         f"vectors/s with {n_docs} neighbors each."
     )
+    
     return top_ids_and_scores
 
 
