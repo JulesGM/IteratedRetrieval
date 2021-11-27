@@ -8,16 +8,18 @@ import importlib
 import logging
 import os
 from pathlib import Path
+import pickle
 try:
     import ujson as json
 except ImportError:
     import json
-    
+
 from pathlib import Path
 import re
+import shutil
+import sys
 import time
 from typing import *
-import sys
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -45,7 +47,7 @@ import dense_retriever
 print(dense_retriever.__file__)
 import jules_validate_dense_retriever
 
-# sys.path.insert(0, str(ROOT_PATH / "GAR" / "gar"))              
+# sys.path.insert(0, str(ROOT_PATH / "GAR" / "gar"))
 # import utils_gen
 
 LOGGER = logging.getLogger(__name__)
@@ -383,11 +385,33 @@ def retrieve(
     return top_ids_and_scores
 
 
-def build_retriever(cfg):
-    with utils.time_this("common_retriever.load_passages (~6 min)"):
-        all_passages, id_prefixes = load_passages(
-            cfg,
-        )
+def build_retriever(cfg, caching_directory: Path) -> Tuple[dense_retriever.LocalFaissRetriever, Dict[str, str], str]:
+    
+    if caching_directory is not None:
+        if not caching_directory.exists() or not caching_directory.is_dir():
+            os.mkdir(caching_directory)
+
+        if not (caching_directory / "all_passages.pkl").exists() or not (caching_directory / "id_prefixes.json").exists():
+            with utils.time_this("common_retriever.load_passages (~6 min)"):
+                all_passages, id_prefixes = load_passages(
+                    cfg,
+                )
+            with utils.time_this("common_retriever.build_retriever save passages"):
+                with open(caching_directory / "all_passages.pkl", "wb") as f:
+                    pickle.dump(all_passages, f)
+                with open(caching_directory / "id_prefixes.json", "w") as f:
+                    json.dump(id_prefixes, f)
+        else:
+            with utils.time_this("common_retriever.build_retriever load passages"):
+                with open(caching_directory / "all_passages.pkl", "rb") as f:
+                    all_passages = pickle.load(f)
+                with open(caching_directory / "id_prefixes.json", "r") as f:
+                    id_prefixes = json.load(f)
+    else:
+        with utils.time_this("common_retriever.load_passages (~6 min)"):
+            all_passages, id_prefixes = load_passages(
+                cfg,
+            )
 
     with utils.time_this("common_retriever.make_retriever (~11 min.)"):
         retriever = (
@@ -399,8 +423,27 @@ def build_retriever(cfg):
             load_data(cfg)
         )
 
-        n_docs = cfg.n_docs
     return retriever, all_passages, special_query_token
+
+
+def build_cfg(dpr_conf_path):
+    try:
+        hydra.initialize_config_dir(config_dir=str(dpr_conf_path))
+        
+    except ValueError as err:
+        message = (
+            "GlobalHydra is already initialized, call "
+            "GlobalHydra.instance().clear() if you want to re-initialize"
+        )
+        if message not in err.args[0]:
+            raise err
+
+    dpr_cfg = hydra.compose(
+        config_name="dense_retriever",
+        overrides=["out_file=/tmp/"]
+    )
+    
+    return dpr_cfg
 
 
 def faiss_to_gpu(index):
