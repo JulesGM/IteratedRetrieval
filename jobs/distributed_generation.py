@@ -33,7 +33,7 @@ logging.basicConfig(
     force=True,
 )
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).absolute().parent
 
 sys.path.insert(0, str(SCRIPT_DIR / "retrieve_and_decode"))
 import iterated_retrieval as ir

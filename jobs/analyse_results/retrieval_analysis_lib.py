@@ -1,5 +1,3 @@
-import asyncio
-import base64
 import collections
 import functools
 import io
@@ -12,7 +10,6 @@ import pickle
 import re
 import shutil
 import sys
-import time
 from typing import *
 
 import beartype
@@ -20,16 +17,11 @@ import bs4
 import colorama
 import fire
 import hydra
-from IPython.display import display, HTML
 import jinja2
 import jsonlines as jsonl
-from mpl_toolkits import mplot3d
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import matplotlib.ticker
 import more_itertools
-import nest_asyncio
 import numpy as np
 import omegaconf
 import retrieval_analysis_lib as ra
@@ -37,14 +29,11 @@ import pandas as pd
 import rich
 import rich.console
 
+# Used in the `analyse` function.
 sys.path.insert(0, "/home/mila/g/gagnonju/IteratedDecoding/DPR/")
-import dense_retriever
-
 sys.path.insert(0, "/home/mila/g/gagnonju/IteratedDecoding/jobs/retrieve_and_decode")
-import common_retriever
-import iterated_utils as utils
-print("Done with all imports")
 
+PathType = Union[str, Path]
 LOGGER = logging.getLogger(__name__)
 ROOT = Path("/home/mila/g/gagnonju/IteratedDecoding/")
 _NUM_ENTRIES = 5
@@ -55,13 +44,23 @@ def _get_loop_i_extractor():
     return re.compile(r"retr_outs_(\w+)\.jsonl")
 
 
-def prep_retrievals_object(input_folder):
+def _log_skip_message(message):
+    LOGGER.warning(f"{colorama.Fore.YELLOW}{message}{colorama.Style.RESET_ALL}")
+
+
+def prep_retrievals_object(input_folder: PathType) -> Optional[Dict[int, List]]:
     assert input_folder.exists(), input_folder
     retr_outs = list(input_folder.glob("retr_outs_*.jsonl"))
-    retr_outs_and_loop_i = [(int(_get_loop_i_extractor().match(path.name).group(1)), path) for path in retr_outs]
-    retr_outs_and_loop_i.sort(key=lambda pair: pair[0])
-    retr_outs_and_loop_i = retr_outs_and_loop_i
+    if not retr_outs:
+        return None
 
+    retr_outs_and_loop_i = []
+    for path in retr_outs:
+        assert path.exists(), path
+        idx = int(_get_loop_i_extractor().match(path.name).group(1))
+        retr_outs_and_loop_i.append((idx, path))
+
+    retr_outs_and_loop_i.sort(key=lambda pair: pair[0])
     retrievals = collections.defaultdict(list)
 
     for loop_i, path in retr_outs_and_loop_i:
@@ -84,26 +83,44 @@ def prep_retrievals_object(input_folder):
                 first = len(entry)
             else:
                 assert len(entry) == first, (len(entry, first))
-    
+        
     return retrievals
     
 
-def prep_directories(input_folder, root, output_dir_name):
-    out_file_directory = root / "jobs" / "analyse_results" / "retrieval_analysis_outputs"
-    out_file = out_file_directory / f"{output_dir_name}"
+def prep_directories(
+    input_folder: Union[str, Path], 
+    project_root_dir: Union[str, Path], 
+    output_dir_name: str, 
+    display_only: bool
+):
+    assert input_folder.exists(), input_folder
+    assert project_root_dir.exists(), input_folder
+    assert output_dir_name, output_dir_name
 
+    out_file_root = project_root_dir / "jobs" / "analyse_results" / "retrieval_analysis_outputs"
+    out_dir = out_file_root / output_dir_name
 
-    # Create the output directory, delete it if it already exists
-    if out_file.exists():
-        shutil.rmtree(out_file)
-    os.mkdir(out_file)
-    os.mkdir(out_file / "input_dir")
+    if not display_only:
+        # Create the output directory, delete it if it already exists
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        os.mkdir(out_dir)
+        os.mkdir(out_dir / "input_dir")
 
     # Copy the input files to the output directory
-    input_copy_dir = out_file / "input_dir" / input_folder.name
-    shutil.copytree(input_folder, input_copy_dir)
+    input_copy_dir = out_dir / "input_dir" 
     
-    return out_file, input_copy_dir
+    if not display_only:
+        for file_ in input_folder.glob("*"):
+            target_input = input_folder / file_.name
+            target_output = input_copy_dir / file_.name
+
+            if target_input.is_file():
+                shutil.copy(target_input, target_output)
+            else:
+                shutil.copytree(target_input, target_output)
+    
+    return out_dir, input_copy_dir
 
 
 def _clean_contents(contents):
@@ -189,9 +206,10 @@ def plot_retrieval_accuracies(np_actual_values):
     fake_file = io.BytesIO()
     plt.savefig(fake_file, format="png", dpi=600)
     fake_file.seek(0)
-    encoded = base64.b64encode(fake_file.read()).decode("utf-8")
+    bytes_ = fake_file.read()
+    # encoded = base64.b64encode(bytes_).decode("utf-8")
     plt.close()
-    return encoded
+    return bytes_
 
 
 def prep_accuracies_table_html(accuracies):
@@ -246,28 +264,21 @@ f"""<p>
         """)
 
     for line in data:
-        html += "\t\t\t<tr><td>" + str(line) + "</td></tr>\n"
+        html += "\t\t\t<tr><td>" + str(line).replace("\n", "").replace("\r", "") + "</td></tr>\n"
     html += (
 """ 
     </table>
 </p>""")
 
-    script = f"""
-$("#{id_}_button").click(
-        function() {{ 
-            flip_visibility("#{id_}_table"); 
-            
-            console.log(`flipped: ${{$("#{id_}_table").css("display")}}`);
-        }}
-);"""
+    return html, id_
 
-    return html, script
 
-def _by_it_no(path):
+def _by_it_no(path: PathType) -> int:
     path = Path(path)
     return int(path.stem.split("_")[-1])
 
-def make_hideable_tables(input_dir: Union[Path, str]):
+
+def make_hideable_tables(input_dir: Union[Path, str]) -> Optional[Union[str, List[int]]]:
     input_dir = Path(input_dir)
     
     data_names = ["gen_inputs", "q_aug_outs", "retr_inputs"]
@@ -278,27 +289,32 @@ def make_hideable_tables(input_dir: Union[Path, str]):
     )
     paths = {key: [] for key in data_names}
 
+
     for name in data_names:
         paths[name] = sorted(input_dir.glob(f"{name}_*.jsonl"), key=_by_it_no) 
     
     inputs = []
     for data_name in data_names:
-        for i, path in enumerate(paths[data_name]):
+        for i, path in enumerate(paths[data_name], 1):
             idx = _by_it_no(path)
-            assert i == idx, (i, idx)
+            assert i == idx, f"{i = }, {idx = }, {paths[data_name]}"
             special_descr = ""
 
-            if i == 0 and data_name == "gen_inputs":
+            if i == 0 and data_name == "retr_inputs":
                 special_descr = " = Just Questions"
 
             inputs.append(
                     dict(
                         path=path, 
-                        data_name=data_name, 
+                        data_name=data_name + f"_{i}", 
                         description=f"{data_descr[data_name]} {idx}{special_descr}"
                 )
             )
 
+
+    if not inputs:
+        return None
+    
     inputs_converted = [
         jsonl_to_table(
                 path=x["path"], 
@@ -308,22 +324,22 @@ def make_hideable_tables(input_dir: Union[Path, str]):
             ) for x in inputs
     ]
 
-    inputs_html_list, inputs_scripts_list = zip(*inputs_converted)
+    inputs_html_list, ids = zip(*inputs_converted)
     inputs_html = "\n".join(inputs_html_list)
-    inputs_scripts = "\n".join(inputs_scripts_list)
 
-    return inputs_html, inputs_scripts
+    return inputs_html, ids
 
 
 @beartype.beartype
 def display_results(
     results: dict, 
     output_dir: Union[Path, str], 
-    args: Dict[str, Any], 
+    input_copy_dir: Union[Path, str],
     input_dir: Union[Path, str]
 ) -> None:
-
     input_dir = Path(input_dir)
+    args = json.loads((input_copy_dir / "notebook_args.json").read_text())
+
     results_tuple = sorted(results.items(), key=lambda pair: pair[0])
     actual_keys = set(list(zip(*results_tuple))[0])
     actual_values = list(zip(*results_tuple))[1]
@@ -334,7 +350,7 @@ def display_results(
     ########################################################################
     # Draw and encode the retrieval accuracies plot
     ########################################################################
-    encoded = plot_retrieval_accuracies(retrieval_accuracies)
+    image_bytes = plot_retrieval_accuracies(retrieval_accuracies)
 
     ########################################################################
     # Convert the results to a dataframe
@@ -349,29 +365,53 @@ def display_results(
     ########################################################################
     # Make hidable tables and scripts
     ########################################################################
-    tables_html, tables_scripts = make_hidable_tables()
-    
-    ########################################################################
-    # Write the html file
-    ########################################################################
-    
+    maybe_pair = make_hideable_tables(input_dir)
+    if maybe_pair:
+        tables_html, tables_id_prefixes = maybe_pair
+    else: 
+        LOGGER.info(f"Slipping {input_dir}")
+        return
 
-    template_text = (
-        ROOT / "jobs" / "analyse_results" / "output_template.jinja2"
+    ########################################################################
+    # Render the templates
+    ########################################################################
+    templates_dir = ROOT / "jobs" / "analyse_results" / "templates"
+
+    # Prepare the HTML
+    html_template_text = (
+        templates_dir / "template_html.jinja2"
     ).read_text().strip()
-    template = jinja2.Template(template_text)
-    html = template.render(
+    html_template = jinja2.Template(html_template_text)
+    html = html_template.render(
         args_body=args_body,
-        encoded=encoded,
         table_html=accuracies_table_html,
         args_style=args_style,
-        inputs_html=inputs_html,
-        inputs_scripts=inputs_scripts,
+        inputs_html=tables_html,
     )
-    
-    output_file = output_dir / "results.html"
-    output_file.write_text(html)
-    print(f"Wrote the HTML: {output_file}")
+
+    # Prepare the Javascript
+    script_template_text = (
+        templates_dir / "template_script.jinja2"
+    ).read_text().strip()
+    script_template = jinja2.Template(script_template_text)
+    script = script_template.render(
+        inputs_scripts=json.dumps(tables_id_prefixes),
+    )
+
+    # Prepare the CSS
+    style_template_text = (
+        templates_dir / "template_style.jinja2"
+    ).read_text().strip()
+    style_template = jinja2.Template(style_template_text)
+    style = style_template.render()
+
+    ########################################################################
+    # Write to the output files
+    ########################################################################
+    (output_dir / "plot.png").write_bytes(image_bytes)
+    (output_dir / "results.html").write_text(html)
+    (output_dir / "script.js").write_text(script)
+    (output_dir / "style.css").write_text(style)
 
 
 @beartype.beartype
@@ -391,22 +431,32 @@ def load_questions_and_answers(
     return questions, question_answers
 
 def analyse(
-    cfg: omegaconf.DictConfig, 
-    input_folder_name: str, 
-    retrieve_and_decode_output: Union[str, Path], 
-    question_answers: List[str], 
-    passages: Dict[str, str],
+    out_file: Union[str, Path],
+    root: Union[str, Path],
+    input_copy_dir: Union[str, Path],
 ):
-    output_dir_name = input_folder_name
-    input_folder = retrieve_and_decode_output / input_folder_name
-    assert input_folder.exists(), input_folder
+    # These imports take a while, so we do them here
+    import dense_retriever
+    import common_retriever
+    import iterated_utils as utils
+    print("Done with all imports")
+
+    dpr_conf_path = root / "DPR" / "conf"
+    cfg = common_retriever.build_cfg(dpr_conf_path)
+
+    with (root / "jobs" / "cache" / "all_passages.pkl").open("rb") as fin:
+        passages = pickle.load(fin)
+
+    _, question_answers = load_questions_and_answers(cfg, "nq_dev")
 
     ########################################################################
     # Start working.
     ########################################################################
-    out_file, input_copy_dir = prep_directories(input_folder, ROOT, output_dir_name)
-    retrievals = prep_retrievals_object(input_copy_dir)
-
+    maybe_retrievals = prep_retrievals_object(input_copy_dir)
+    if not maybe_retrievals:
+        _log_skip_message("No retr_outs_*.jsonl. Skipping {input_copy_dir.name}")
+        return
+    retrievals = maybe_retrievals
 
     ########################################################################
     # Validate the retrievals
@@ -427,7 +477,10 @@ def analyse(
                 output_file=output_file,
             )
             results[loop_i] = output
-    return results, out_file, input_copy_dir, input_folder
+
+
+    assert isinstance(results, dict), type(results).mro()
+    return results
 
 
 def _segment(sentence):
@@ -503,7 +556,29 @@ def compute_gen_distance(args, input_folder):
     plt.title(f"{args['decoding_conf_query_aug']['temperature'] = }")
 
 
-def main(input_folder_name):
+def parse_results_files(results_dir):
+    input_files = results_dir.glob("validate_*.txt")
+    if not input_files:
+        _log_skip_message("No validate_*.txt files found in {results_dir}. Skipping.")
+        return None
+
+    results = dict()
+    for path in input_files:
+        idx = _by_it_no(path)
+        lines = path.read_text().strip().split("\n")
+        with_results = lines[1]
+        start = with_results.find("[")
+        end = with_results.find("]")
+        with_results = json.loads(with_results[start:end + 1])
+        results[idx] = with_results
+
+    assert isinstance(results, dict), type(results).mro()
+    return results
+
+
+def main(input_folder_name, display_only=False):
+    assert isinstance(display_only, bool), type(display_only).mro()
+
     format_info = (
         "[%(levelname)s] (%(asctime)s) "
         "{%(name)s->%(funcName)s:%(lineno)d}:\n"
@@ -553,27 +628,34 @@ def main(input_folder_name):
     RETRIEVE_AND_DECODE_ROOT = ROOT / "jobs" / "retrieve_and_decode"
     RETRIEVE_AND_DECODE_OUTPUT = RETRIEVE_AND_DECODE_ROOT / "iterated_decoding_output"
 
+    output_dir_name = input_folder_name
+    input_folder = RETRIEVE_AND_DECODE_OUTPUT / input_folder_name
+    assert input_folder.exists(), input_folder
 
-    DPR_CONF_PATH = ROOT / "DPR" / "conf"
-    cfg = common_retriever.build_cfg(DPR_CONF_PATH)
-
-    with (ROOT / "jobs" / "cache" / "all_passages.pkl").open("rb") as fin:
-        passages = pickle.load(fin)
-
-    questions, question_answers = load_questions_and_answers(cfg, "nq_dev")
-
-    results, out_file, input_copy_dir, input_folder = analyse(
-        cfg=cfg,
-        input_folder_name=input_folder_name, 
-        retrieve_and_decode_output=RETRIEVE_AND_DECODE_OUTPUT,
-        question_answers=question_answers,
-        passages=passages,
+    out_file, input_copy_dir = prep_directories(
+        input_folder=input_folder, 
+        project_root_dir=ROOT, 
+        output_dir_name=output_dir_name, 
+        display_only=display_only,
     )
 
-    args = utils.load_json(input_copy_dir / "notebook_args.json")
-    display_results(results, out_file, args, input_folder)
-    rich.print("[bold green]DONE!")
+    if display_only:
+        # Parse the results files
+        results = parse_results_files(out_file)
+    else:
+        results = analyse(
+            out_file=out_file,
+            root=ROOT,
+            input_copy_dir=input_copy_dir,
+        )
+    
+    if results is None:
+        
+        return
 
+    assert isinstance(results, dict), type(results).mro()
+    display_results(results, out_file, input_copy_dir, input_folder)
+    rich.print("[bold green]DONE!")
     # compute_gen_distance(args, input_folder)
 
 

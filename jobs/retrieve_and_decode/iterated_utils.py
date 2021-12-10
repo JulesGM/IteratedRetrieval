@@ -11,7 +11,7 @@ import time
 import types
 from typing import *
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).absolute().parent
 LOGGER = logging.getLogger(__name__)
 
 import beartype
@@ -31,6 +31,11 @@ except ImportError:
     import json
 
 
+def tensor_chunked(buf, chunk):
+    for start in range(0, len(buf), chunk):
+        yield buf[start:start + chunk]
+
+
 class ValueEnumMeta(enum.EnumMeta):
     """__contains__ compares to the values. 
     Allows to do something like `"apple" in FruitEnum` instead of just 
@@ -45,7 +50,7 @@ class ValueEnumMeta(enum.EnumMeta):
     https://github.com/python/cpython/blob/main/Lib/enum.py#L621
     """
     def __contains__(cls, thing):
-        return thing in cls._member_map_.values() or thing in cls._member_map
+        return thing in cls._member_map_.values() or thing in cls._member_map_
 
     def error(cls, value):
             """This is just a super
@@ -445,3 +450,5 @@ if __name__ == "__main__":
     print(f"{indices_pt.shape = }")
     print(indices_pt)
     print("done")
+
+

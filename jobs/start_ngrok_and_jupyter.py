@@ -11,7 +11,7 @@ import yaml
 import fire
 import requests
 
-SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()
+SCRIPT_DIR = pathlib.Path(__file__).absolute().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 
 NGROK_PORT_DEFAULT = 8889

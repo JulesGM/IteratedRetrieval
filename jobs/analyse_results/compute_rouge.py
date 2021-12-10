@@ -14,7 +14,7 @@ import fire
 import rich
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).absolute().parent
 
 ###############################################################################
 # General Utils

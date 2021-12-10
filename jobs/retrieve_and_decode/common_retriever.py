@@ -1,5 +1,4 @@
 print("(Re)/Loading common_retriever.py")
-
 # Standard library
 import collections
 import copy
@@ -9,6 +8,9 @@ import logging
 import os
 from pathlib import Path
 import pickle
+
+import more_itertools
+
 try:
     import ujson as json
 except ImportError:
@@ -21,10 +23,9 @@ import sys
 import time
 from typing import *
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).absolute().parent
 
 # Third party
-import beartype
 import faiss
 import hydra
 import numpy as np
@@ -34,6 +35,7 @@ import torch
 
 # First Party
 import iterated_utils as utils
+
 
 ROOT_PATH = SCRIPT_DIR.parent.parent
 DPR_PATH = ROOT_PATH  / "DPR"
@@ -45,8 +47,9 @@ import dpr.utils.model_utils
 import dpr.indexer.faiss_indexers
 import dense_retriever
 print(dense_retriever.__file__)
-import jules_validate_dense_retriever
 
+
+import jules_validate_dense_retriever
 # sys.path.insert(0, str(ROOT_PATH / "GAR" / "gar"))
 # import utils_gen
 
@@ -60,6 +63,7 @@ LOGGER.info(f"{dense_retriever.__file__ = }")
 _parse_version_version_string_pat = re.compile(
     r"^([0-9]+\.[0-9]+\.[0-9]+)"
 )
+
 
 
 def _parse_version(version_string):
@@ -98,11 +102,11 @@ def prep_cfg(cfg, verbose=False):
     #######################################################
     # Complete and validate CFG
     #######################################################
-    jules_validate_dense_retriever.validate(
-        {k: getattr(cfg, k) for k in dir(cfg)},
-        dense_retriever.SCHEMA_PATH,
-        verbose,
-    )
+    # jules_validate_dense_retriever.validate(
+    #     {k: getattr(cfg, k) for k in dir(cfg)},
+    #     dense_retriever.SCHEMA_PATH,
+    #     verbose,
+    # )
     cfg = dpr.options.setup_cfg_gpu(cfg)
 
     assert cfg.out_file, cfg.out_file
@@ -208,6 +212,8 @@ def load_passages(cfg):
 # Build the retriever
 ###########################################################
 def make_retriever(cfg, id_prefixes):
+    
+
     cfg = copy.copy(cfg)
     prep_cfg(cfg)
 
@@ -284,12 +290,14 @@ def make_retriever(cfg, id_prefixes):
     index_buffer_sz = index.buffer_size
     index.init_index(vector_size)
     LOGGER.debug("dense_retriever.LocalFaissRetriever")
+
     retriever = dense_retriever.LocalFaissRetriever(
         encoder,
         cfg.batch_size,
         tensorizer,
         index,
     )
+
     LOGGER.debug("Loaded retriever.")
 
     #------------------------------------------------------
@@ -313,12 +321,16 @@ def make_retriever(cfg, id_prefixes):
 
     input_paths = []
     path_id_prefixes = []
+    for path in ctx_files_patterns:
+        assert Path(path).exists(), (path)
+
     for i, pattern in enumerate(ctx_files_patterns):
         pattern_files = glob.glob(pattern)
         pattern_id_prefix = id_prefixes[i]
         input_paths.extend(pattern_files)
         path_id_prefixes.extend([pattern_id_prefix] * len(pattern_files))
 
+    assert index_path and index.index_exists(index_path)
     if index_path and index.index_exists(index_path):
         LOGGER.info(
             f"retriever.index.deserialize {index_path},"
@@ -326,6 +338,7 @@ def make_retriever(cfg, id_prefixes):
         )
         retriever.index.deserialize(index_path)
     else:
+        assert False, f"{index_path} should exist"
         LOGGER.info(f"retriever.index_encoded_data {input_paths}")
         retriever.index_encoded_data(
             input_paths,
@@ -347,6 +360,7 @@ def retrieve(
     questions: List[str],
     special_query_token: Optional[str],
     n_docs: int,
+    retrieval_max_size: int,
 ):
     batch_size = len(questions)
 
@@ -371,10 +385,30 @@ def retrieve(
     )
     LOGGER.debug(f"get_top_docs: Starting.")
     start = time.monotonic()
-    top_ids_and_scores = retriever.get_top_docs(
-        questions_tensor.numpy(),
-        n_docs,
+    
+    assert retrieval_max_size == 15, (retrieval_max_size,)
+    top_ids_and_scores = []
+    for batch in utils.tensor_chunked(questions_tensor, retrieval_max_size):
+        
+        top_ids_and_scores_batch = retriever.get_top_docs(
+            batch.numpy(),
+            n_docs,
+        )
+        top_ids_and_scores.extend(top_ids_and_scores_batch)
+
+    ids, scores = zip(*top_ids_and_scores)
+    
+    scores = np.stack(scores)
+    top_ids_and_scores = (ids, scores)
+
+    assert len(top_ids_and_scores[0]) == questions_tensor.size(0), (
+        f"{len(top_ids_and_scores[0]) = }, {questions_tensor.size(0) = }"
     )
+
+    assert len(top_ids_and_scores[1]) == questions_tensor.size(0), (
+        f"{len(top_ids_and_scores[1]) = }, {questions_tensor.size(0) = }"
+    )
+
     delta = time.monotonic() - start
     LOGGER.debug(
         f"Retrieval took {delta:0.2f} sec. "
