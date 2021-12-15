@@ -1,0 +1,20 @@
+{
+    "query_aug_model_type": "answer",
+    "dataloader_max_source_len": 30,
+    "final_num_contexts": 100,
+    "n_docs": 100,
+    "max_loop_n": 4,
+    "selection_mode": "argmax_w_aug",
+    "augmentation_mode": "concatenate",
+
+    "decoding_conf_query_aug": {
+        "max_length": 40,
+        "num_return_sequences": 5,
+        "do_sample": true,
+        "temperature": 5.0,
+        "early_stopping": true,
+        "repetition_penalty": 3.0
+    }
+}
+
+

@@ -1,0 +1,11 @@
+{
+    "oracle_mode": true,
+    "dataloader_max_source_len": 30,
+    "final_num_contexts": 100,
+    "n_docs": 100,
+    "selection_mode": "argmax_top_k",
+    "augmentation_mode": "concatenate",
+    "query_aug_model_type": "answer"
+}
+
+
