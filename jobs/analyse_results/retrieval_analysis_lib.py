@@ -29,6 +29,7 @@ import pandas as pd
 import rich
 import rich.console
 
+
 # Used in the `analyse` function.
 sys.path.insert(0, "/home/mila/g/gagnonju/IteratedDecoding/DPR/")
 sys.path.insert(0, "/home/mila/g/gagnonju/IteratedDecoding/jobs/retrieve_and_decode")
@@ -37,6 +38,7 @@ PathType = Union[str, Path]
 LOGGER = logging.getLogger(__name__)
 ROOT = Path("/home/mila/g/gagnonju/IteratedDecoding/")
 _NUM_ENTRIES = 5
+            
 
 functools.lru_cache(maxsize=1)
 def _get_loop_i_extractor():
@@ -295,7 +297,7 @@ def make_hideable_tables(input_dir: Union[Path, str]) -> Optional[Union[str, Lis
     
     inputs = []
     for data_name in data_names:
-        for i, path in enumerate(paths[data_name], 1):
+        for i, path in enumerate(paths[data_name], 0):
             idx = _by_it_no(path)
             assert i == idx, f"{i = }, {idx = }, {paths[data_name]}"
             special_descr = ""

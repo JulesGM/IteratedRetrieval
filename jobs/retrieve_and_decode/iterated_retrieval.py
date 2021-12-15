@@ -1,12 +1,17 @@
 print("(Re)/Loading iterated_retrieval.py")
 
 # Standard library
+import abc
 import argparse
 import collections
+import contextlib
 import copy
 import dataclasses
 import glob
 import importlib
+
+from transformers.file_utils import ENV_VARS_TRUE_AND_AUTO_VALUES
+from transformers.tokenization_utils_base import ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
 
 try:
     import ujson as json
@@ -61,6 +66,67 @@ LOGGER.info(f"{dense_retriever.__file__ = }")
 
 
 PathType = Union[str, Path]
+
+
+class NLI:
+    ENTAILMENT_POS = 0
+    NEUTRAL_POS = 1
+    CONTRADICTION_POS = 2
+
+
+    def __init__(self, ) -> None:    
+        self.hg_model_hub_name = "ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli"
+        # self.hg_model_hub_name = "ynie/albert-xxlarge-v2-snli_mnli_fever_anli_R1_R2_R3-nli" # Didn't work
+        # self.hg_model_hub_name = "ynie/bart-large-snli_mnli_fever_anli_R1_R2_R3-nli"
+        # self.hg_model_hub_name = "ynie/electra-large-discriminator-snli_mnli_fever_anli_R1_R2_R3-nli"
+        # self.hg_model_hub_name = "ynie/xlnet-large-cased-snli_mnli_fever_anli_R1_R2_R3-nli"
+
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+            self.hg_model_hub_name
+        )
+        LOGGER.info(f"Loading model: \"{self.hg_model_hub_name}\"")
+        self.model = transformers.AutoModelForSequenceClassification.from_pretrained(
+            self.hg_model_hub_name
+        )
+        LOGGER.info("Model loaded.")
+
+        self.call_args = []
+        self.call_kwargs = dict()
+        self.tokenizer_args = []
+        self.tokenizer_kwargs = dict(
+            pad_to_max_length=True,
+            return_tensors="pt",
+            return_token_type_ids=True, 
+            truncation=True,
+        )
+        
+        
+    @classmethod
+    def _all(cls, preds):
+        return preds[:, cls.ENTAILMENT_POS]
+
+
+    def __call__(self, contexts, questions, answers) -> Any:
+        tokenizer_batch = self.tokenizer.batch_encode_plus(
+            contexts, 
+            questions + answers, 
+            *self.tokenizer_args, 
+            **self.tokenizer_kwargs,
+        )
+
+        raw_preds = self.model(
+            tokenizer_batch, 
+            *self.call_args, 
+            **self.call_kwargs
+        )   
+        assert raw_preds.ndims == 2, raw_preds.ndims
+        assert raw_preds.shape[1] == 3, raw_preds.shape
+
+        preds = self._all(raw_preds)
+
+        assert preds.ndims == 1, preds.shape
+
+        return preds
 
 
 def build_tokenizers_and_datasets(
@@ -397,125 +463,199 @@ class SelectionTechniqueChecksInfo:
     loop_i: int
 
 
-@beartype.beartype
-def selection_technique(
-    top_ids_np: np.ndarray,
-    scores_retr_np: np.ndarray,
-    final_num_contexts: int,
-    query_scores_batch: np.ndarray,
-    checks_info: SelectionTechniqueChecksInfo,
-    is_first_loop: bool,
-    selection_mode: str,
-) -> np.ndarray:
 
-    # Shape verifications
-    utils.check_shape(top_ids_np.shape, (
-        checks_info.batch_size, 
-        checks_info.num_sequences, 
-        checks_info.n_docs,
-    ))
-    effective_batch_size, queries_per_question, n_docs = top_ids_np.shape
+class SelectionTechnique(abc.ABC):
+    def __init__(self):
+        pass
 
-    if selection_mode == SelectionModes.DUMB_TOP_K:
-        # Actual Work
-        top_ids_np = top_ids_np.reshape(
-            effective_batch_size,  queries_per_question * n_docs,
-        )
-        scores_retr_np = scores_retr_np.reshape(
-            effective_batch_size,  queries_per_question * n_docs,
-        )
-        indices_w_torch = utils.topk_w_torch(
-            scores_retr_np, final_num_contexts, dim=1,
-        )
-        utils.check_shape(indices_w_torch.shape, (scores_retr_np.shape[0], final_num_contexts))
-        assert indices_w_torch is not None
-        output = utils.get_reference(top_ids_np, indices_w_torch)
 
-    elif selection_mode == SelectionModes.ADDITIVE_TOP_K:
-        output = utils.top_k_sum(
-            scores=scores_retr_np,
-            indices=top_ids_np,
-            final_qty=final_num_contexts,
-        )
+    @final
+    def select(
+        self,
+        *,
+        top_retr_ids_np: np.ndarray,
+        scores_retr_np: np.ndarray,
+        final_num_contexts: int,
+        query_scores_batch: np.ndarray,
+        checks_info: SelectionTechniqueChecksInfo,
+        is_first_loop: bool,
+        question_text: List[str],
+        retr_text: List[str],
+        query_aug_text: List[str],
+    ):
+        utils.check_shape(top_retr_ids_np.shape, (
+            checks_info.batch_size, 
+            checks_info.num_sequences, 
+            checks_info.n_docs,
+        ))
 
-    elif selection_mode == SelectionModes.ARGMAX_TOP_K:
-        output = utils.top_k_max(
-            scores=scores_retr_np,
-            indices=top_ids_np,
-            final_qty=final_num_contexts,
+        effective_batch_size, queries_per_question, n_docs = top_retr_ids_np.shape
+
+        output = self._select(
+            top_retr_ids_np,
+            scores_retr_np,
+            final_num_contexts,
+            query_scores_batch,
+            checks_info,
+            is_first_loop,
+            question_text,
+            retr_text,
+            query_aug_text,
+            effective_batch_size,
+            queries_per_question,
+            n_docs,
         )
 
-    elif selection_mode == SelectionModes.ARGMAX_W_AUG:
+        # Shape Verification
         try:
-            if not is_first_loop:    
-                assert query_scores_batch is not None
-                assert scores_retr_np is not None
-                assert (
-                    query_scores_batch.dtype == np.float32 or 
-                    query_scores_batch.dtype == np.float64
-                ), f"query_scores_batch.dtype = {query_scores_batch.dtype}"
-                assert (
-                    scores_retr_np.dtype == np.float32 or 
-                    scores_retr_np.dtype == np.float64
-                ), f"scores_retr_np.dtype = {scores_retr_np.dtype}"
+            utils.check_shape(
+                output.shape, (checks_info.batch_size, final_num_contexts)
+            )
+        except ValueError as err:
+            raise utils.add_to_err(
+                err,
+                f"\t- {checks_info.batch_size = }\n"
+                f"\t- {checks_info.num_sequences = }\n"
+                f"\t- {checks_info.n_docs = }\n"
+                f"\t- {checks_info.loop_i = }\n"
+            )
 
-                
-                query_scores_batch = query_scores_batch.squeeze(2)
+        return output
 
-                utils.check_shape(
-                    scores_retr_np.shape, 
-                    (effective_batch_size, queries_per_question, n_docs),
-                )
-                utils.check_shape(
-                    query_scores_batch.shape,
-                    (effective_batch_size, queries_per_question),
-                )
 
-                unsqueezed_query_scores_batch = np.expand_dims(query_scores_batch, 2)
-                output = utils.top_k_max(
-                    scores=scores_retr_np * unsqueezed_query_scores_batch,
-                    indices=top_ids_np,
-                    final_qty=final_num_contexts,
-                )
+    @abc.abstractmethod
+    def _select(
+        self,
+        top_retr_ids_np: np.ndarray,
+        scores_retr_np: np.ndarray,
+        final_num_contexts: int,
+        query_scores_batch: np.ndarray,
+        checks_info: SelectionTechniqueChecksInfo,
+        is_first_loop: bool,
+        question_text: List[str],
+        retr_text: List[str],
+        query_aug_text: List[str],
+        effective_batch_size: int,
+        queries_per_question: int,
+        n_docs: int,
+    ):
+        pass
 
-            else:
-                output = utils.top_k_max(
-                    scores=scores_retr_np,
-                    indices=top_ids_np,
-                    final_qty=final_num_contexts,
-                )
-        except Exception as e:
-            e = utils.add_to_err(e, str(checks_info.loop_i))
-            raise e
-    else:
-        SelectionModes.error(selection_mode)
+
+    @final
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.select(*args, **kwds)
+
+
+class AugTopK(SelectionTechnique):
+    def _select(
+        self,
+        top_retr_ids_np: np.ndarray,
+        scores_retr_np: np.ndarray,
+        final_num_contexts: int,
+        query_scores_batch: np.ndarray,
+        checks_info: SelectionTechniqueChecksInfo,
+        is_first_loop: bool,
+        question_text: List[str],
+        retr_text: List[str],
+        query_aug_text: List[str],
+        effective_batch_size: int,
+        queries_per_question: int,
+        n_docs: int,
+    ):
+        if not is_first_loop:    
+            assert query_scores_batch is not None
+            assert scores_retr_np is not None
+            assert (
+                query_scores_batch.dtype == np.float32 or 
+                query_scores_batch.dtype == np.float64
+            ), f"query_scores_batch.dtype = {query_scores_batch.dtype}"
+            assert (
+                scores_retr_np.dtype == np.float32 or 
+                scores_retr_np.dtype == np.float64
+            ), f"scores_retr_np.dtype = {scores_retr_np.dtype}"
+
             
+            query_scores_batch = query_scores_batch.squeeze(2)
 
-    # Shape Verification
-    try:
-        utils.check_shape(
-            output.shape, (checks_info.batch_size, final_num_contexts)
+            utils.check_shape(
+                scores_retr_np.shape, 
+                (effective_batch_size, queries_per_question, n_docs),
+            )
+            utils.check_shape(
+                query_scores_batch.shape,
+                (effective_batch_size, queries_per_question),
+            )
+
+            unsqueezed_query_scores_batch = np.expand_dims(query_scores_batch, 2)
+            return utils.top_k_max(
+                scores=scores_retr_np * unsqueezed_query_scores_batch,
+                indices=top_retr_ids_np,
+                final_qty=final_num_contexts,
+            )
+
+        else:
+            return utils.top_k_max(
+                scores=scores_retr_np,
+                indices=top_retr_ids_np,
+                final_qty=final_num_contexts,
+            )
+
+
+class ArgMaxTopK(SelectionTechnique):
+    def _select(
+        self,
+        top_retr_ids_np: np.ndarray,
+        scores_retr_np: np.ndarray,
+        final_num_contexts: int,
+        *args, **kwargs
+    ):
+        return utils.top_k_max(
+            scores=scores_retr_np,
+            indices=top_retr_ids_np,
+            final_qty=final_num_contexts,
         )
 
-    except ValueError as err:
-        raise utils.add_to_err(
-            err,
-            f"\t- {checks_info.batch_size = }\n"
-            f"\t- {checks_info.num_sequences = }\n"
-            f"\t- {checks_info.n_docs = }\n"
-            f"\t- {checks_info.loop_i = }\n"
+
+class NLITopK(SelectionTechnique):
+    def __init__(self):
+        super().__init__()
+        self.nli_context = NLI()
+
+
+    def _select(
+        self,
+        top_retr_ids_np: np.ndarray,
+        scores_retr_np: np.ndarray,
+        final_num_contexts: int,
+        query_scores_batch: np.ndarray,
+        checks_info: SelectionTechniqueChecksInfo,
+        is_first_loop: bool,
+        question_text: List[str],
+        retr_text: List[str],
+        query_aug_text: List[str],
+        effective_batch_size: int,
+        queries_per_question: int,
+        n_docs: int,
+    ):
+        
+        nli_scores = self.nli_context(
+            context_text=retr_text, 
+            quesiton_text=question_text, 
+            answer_text=query_aug_text
+        )
+        return utils.top_k_max(
+            scores=scores_retr_np * nli_scores,
+            indices=top_retr_ids_np,
+            final_qty=final_num_contexts,
         )
 
-    return output
+SELECTION_TECHNIQUE_TYPES = dict(
+        aug_top_k=AugTopK,
+        arg_max_top_k=ArgMaxTopK,
+        nli_top_k=NLITopK,
+    )
 
-
-class SelectionModes(utils.StrValueEnum):
-    ARGMAX_TOP_K = "argmax_top_k"
-    ARGMAX_W_AUG = "argmax_w_aug"
-    ADDITIVE_TOP_K = "additive_top_k"  # Weird idea
-
-    AVERAGING_TOP_K = "averaging_top_k"  # Weird idea
-    DUMB_TOP_K = "dumb_top_k"  # Trash
 
 
 class AugmentationModes(utils.StrValueEnum):
@@ -622,6 +762,7 @@ class InferenceFunctions:
                             targets_batch,
                         )
                     ):
+                    
                         per_question = []
                         if oracle_mode:
                             if augmentation_mode == AugmentationModes.CONCATENATE:
@@ -659,16 +800,17 @@ class InferenceFunctions:
         retriever_batch_size: int,
         decoding_conf_query_aug,
         all_queries_this_loop,
+        all_query_augs_this_loop,
         query_aug_score_all_loops,
         aug_method,
         retriever,
         all_passages,
         special_query_token,
         n_docs: int,
-        final_num_contexts,
+        final_num_contexts: int,
         selection_mode,
         output_paths,
-        selection_technique_fn,
+        selection_context: SelectionTechnique,
         oracle_mode: bool,
         retrieval_max_size: int,
     ):
@@ -717,7 +859,7 @@ class InferenceFunctions:
                 )
 
 
-            for batch_i, (query_batch, query_scores_batch) in enumerate(
+            for batch_i, (query_batch, query_scores_batch, query_augs_batch) in enumerate(
                 more_itertools.zip_equal(
                     more_itertools.chunked(
                         tqdm.tqdm(
@@ -730,6 +872,10 @@ class InferenceFunctions:
                         all_queries_scores_this_loop,
                         effective_batch_size,
                     ),
+                    more_itertools.chunked(
+                        all_query_augs_this_loop,
+                        effective_batch_size,
+                    )
                 )
             ):
 
@@ -778,19 +924,23 @@ class InferenceFunctions:
                         )
                         raise err
 
-                    selected_contexts_ids_np = selection_technique_fn(
-                        top_ids_np,
-                        scores_retr_np,
-                        final_num_contexts,
-                        np.array(query_scores_batch),
-                        SelectionTechniqueChecksInfo(
+
+                    selected_contexts_ids_np = selection_context(
+                        top_retr_ids_np=top_ids_np,
+                        scores_retr_np=scores_retr_np,
+                        final_num_contexts=final_num_contexts,
+                        query_scores_batch=np.array(query_scores_batch),
+                        checks_info=SelectionTechniqueChecksInfo(
                             batch_size=real_batch_size,
                             num_sequences=queries_per_question,
                             n_docs=n_docs,
                             loop_i=loop_i,
                         ),
                         is_first_loop=loop_i == 0,
-                        selection_mode=selection_mode,
+                        question_text=query_batch,
+                        retr_text=retr_text,
+                        query_aug_text=query_augs_batch,   
+                        is_first=batch_i == 0,
                     )
 
                     utils.check_shape(
@@ -1078,7 +1228,6 @@ def inference(
     reader_model: Optional[train_generator.SummarizationTrainer],
     special_query_token: Optional[str],
     retriever: dense_retriever.LocalFaissRetriever,
-    selection_technique_fn: Callable,
     question_dataloader: torch.utils.data.DataLoader,
     max_loop_n: int,
     decoding_conf_reader,
@@ -1090,13 +1239,15 @@ def inference(
     aug_method: str,
     final_num_contexts: int,
     generation_batch_size: int,
-    selection_mode: Union[SelectionModes, str],
+    selection_mode: str,
     tokenizer_bart: Union[transformers.BartTokenizer, transformers.BartTokenizerFast],
     tokenizer_bert: Union[transformers.BertTokenizer, transformers.BertTokenizerFast],
     augmentation_mode: Union[AugmentationModes, str],
     oracle_mode: bool,
     retrieval_max_size: int,
 ) -> None:
+
+    selection_context = SELECTION_TECHNIQUE_TYPES[selection_mode]()
 
     out_path = Path(out_path)
 
@@ -1153,7 +1304,8 @@ def inference(
                 retriever_batch_size=retriever_batch_size,
                 decoding_conf_query_aug=decoding_conf_query_aug,
                 all_queries_this_loop=all_queries_this_loop,
-                query_aug_score_all_loops=query_aug_score_all_loops,
+                all_query_augs_this_loop=query_aug_text_all_loops[loop_i],
+                query_aug_score_all_loops=query_aug_score_all_loops,  # This is weird
                 aug_method=aug_method,
                 retriever=retriever,
                 all_passages=all_passages,
@@ -1162,7 +1314,7 @@ def inference(
                 final_num_contexts=final_num_contexts,
                 selection_mode=selection_mode,
                 output_paths=output_paths,
-                selection_technique_fn=selection_technique_fn,
+                selection_context=selection_context,
                 oracle_mode=oracle_mode,
                 retrieval_max_size=retrieval_max_size,
             )

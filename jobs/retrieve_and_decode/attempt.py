@@ -82,7 +82,7 @@ def main(config_path: str, run_name: str):
     )
     logging.basicConfig(
         format=logging_format,
-        level=logging.WARNING,
+        level=logging.INFO,
         force=True,
     )
     logging.getLogger(
@@ -112,7 +112,10 @@ def main(config_path: str, run_name: str):
         apply_file_modifications=True,
         )
 
-    rich.print(f"args:\n{vars(args)}")
+    rich.print("args = {")
+    for k, v in sorted(vars(args).items(), key=lambda x: x[0]):
+        rich.print(f"\"{k}\": {v}")
+    rich.print("}")
 
     (
         dataloader, tokenizer_bart, tokenizer_bert,
@@ -125,7 +128,7 @@ def main(config_path: str, run_name: str):
 
     )
 
-
+    LOGGER.info("Loading the index.")
     retriever, all_passages, special_query_token = common_retriever.build_retriever(
         dpr_cfg,
         ROOT_PATH / "jobs" / "retrieve_and_decode" / "cache" 
@@ -133,23 +136,27 @@ def main(config_path: str, run_name: str):
     retriever.index.index = common_retriever.faiss_to_gpu(
         retriever.index.index,
     )
+    LOGGER.info("Done loading the index.")
 
+    
     if args.oracle_mode:
         query_aug_model = None
         reader_model = None
     else:
+        LOGGER.info("Loading the query aug model.")
         query_aug_model, reader_model = ir.build_models(
             reader_model_path=args.reader_model_path,
             query_aug_model_path=args.query_aug_model_path,
         )
+        LOGGER.info("Done loading the query aug model.")
 
+    LOGGER.info("Starting inference.")
     ir.inference(
         all_passages=all_passages,
         query_aug_model=query_aug_model.cuda() if query_aug_model else None,
         reader_model=reader_model.cuda() if reader_model else None,
         special_query_token=special_query_token,
         retriever=retriever,
-        selection_technique_fn=ir.selection_technique,
         question_dataloader=dataloader,
         max_loop_n=args.max_loop_n,
         query_aug_input_max_length=args.max_source_len,

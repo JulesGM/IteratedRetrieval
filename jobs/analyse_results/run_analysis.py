@@ -55,13 +55,13 @@ def main(log_level: str = "DEBUG", display_only: bool = False):
 
         
     for path in targets:
-        command = [sys.executable, str(target_path), path.name]
+        command = [sys.executable, "-W", "ignore", str(target_path), path.name]
         if display_only:
             command.append("--display-only")
         command_str = shlex.join(command)  # Just for logging
         LOGGER.info(f"\nRunning:\n{command_str}")
         out = subprocess.run(command, capture_output=False, check=True)
-        LOGGER.info(str(out) + "\n")
+        # LOGGER.info(str(out) + "\n")
 
 
 if __name__ == "__main__":
