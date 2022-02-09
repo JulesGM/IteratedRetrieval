@@ -1,9 +1,14 @@
 import collections
 import functools
+import itertools
 import io
 import json
 import logging
 import math
+from multiprocessing import Pool as ProcessPool
+import logging
+import unicodedata
+
 import os
 from pathlib import *
 import pickle
@@ -11,8 +16,9 @@ import re
 import shutil
 import sys
 from typing import *
+import warnings
 
-import beartype
+import beartype    
 import bs4
 import colorama
 import fire
@@ -24,22 +30,212 @@ import matplotlib.ticker
 import more_itertools
 import numpy as np
 import omegaconf
-import retrieval_analysis_lib as ra
 import pandas as pd
 import rich
 import rich.console
 
 
-# Used in the `analyse` function.
-sys.path.insert(0, "/home/mila/g/gagnonju/IteratedDecoding/DPR/")
-sys.path.insert(0, "/home/mila/g/gagnonju/IteratedDecoding/jobs/retrieve_and_decode")
 
-PathType = Union[str, Path]
-LOGGER = logging.getLogger(__name__)
-ROOT = Path("/home/mila/g/gagnonju/IteratedDecoding/")
-_NUM_ENTRIES = 5
+
+SCRIPT_DIR: Final = Path(__file__).absolute().parent
+ROOT: Final = SCRIPT_DIR.parent.parent
+GAR_PATH: Final = ROOT / "GAR" / "gar"
+DPR_PATH: Final = ROOT / "DPR"
+CONF_PATH: Final = DPR_PATH / "conf"
+RETRIEVE_AND_DECODE_ROOT: Final = ROOT / "jobs" / "retrieve_and_decode"
+RETRIEVE_AND_DECODE_OUTPUT: Final = RETRIEVE_AND_DECODE_ROOT / "iterated_decoding_output"
+
+sys.path.insert(0, str(GAR_PATH))
+sys.path.insert(0, str(DPR_PATH))
+sys.path.insert(0, str(RETRIEVE_AND_DECODE_ROOT))
+
+import iterated_utils as utils # type: ignore
+import dpr_server.client as dpr_client  # type: ignore
+from dpr.utils.tokenizers import SimpleTokenizer  # type: ignore
+
+PathType: Final = Union[str, Path]
+LOGGER: Final = logging.getLogger(__name__)
+
+_NUM_ENTRIES: Final = 5
             
 
+##########################################################################################
+# DPR Validate stuff
+##########################################################################################
+QAMatchStats = collections.namedtuple(
+    "QAMatchStats", 
+    ["top_k_hits", "questions_doc_hits"]
+)
+
+
+START_TIMESTAMP = utils.timestamp()
+VALIDATE_OUTPUT = Path("/home/mila/g/gagnonju/validate_res/")
+
+def _normalize(text):
+    return unicodedata.normalize("NFD", text)
+
+def regex_match(text, pattern):
+    """Test if a regex pattern is contained within a text."""
+    try:
+        pattern = re.compile(
+            pattern, 
+            flags=re.IGNORECASE + re.UNICODE + re.MULTILINE
+        )
+    except BaseException:
+        return False
+    return pattern.search(text) is not None
+
+
+def has_answer(answers, text, tokenizer, match_type) -> bool:
+    """Check if a document contains an answer string.
+    If `match_type` is string, token matching is done between the 
+    text and answer.
+    If `match_type` is regex, we search the whole text with the regex.
+    """
+    text = _normalize(text)
+
+    if match_type == "string":
+        # Answer is a list of possible strings
+        text = tokenizer.tokenize(text).words(uncased=True)
+
+        for single_answer in answers:
+            single_answer = _normalize(single_answer)
+            single_answer = tokenizer.tokenize(single_answer)
+            single_answer = single_answer.words(uncased=True)
+
+            for i in range(0, len(text) - len(single_answer) + 1):
+                if single_answer == text[i : i + len(single_answer)]:
+                    return True
+
+    elif match_type == "regex":
+        # Answer is a regex
+        for single_answer in answers:
+            single_answer = _normalize(single_answer)
+            if regex_match(text, single_answer):
+                return True
+
+    return False
+
+
+def check_answer(
+    questions_answers_docs, 
+    tokenizer, 
+    match_type
+) -> List[bool]:
+    """
+    Search through all the top docs to see if they have any of the answers.
+    """
+    answers, (doc_ids, doc_scores) = questions_answers_docs
+
+    global dpr_all_documents
+    hits = []
+
+    for i, doc_id in enumerate(doc_ids):
+        doc = dpr_all_documents[doc_id]
+        text = doc[0]
+
+        answer_found = False
+        if text is None:  # cannot find the document for some reason
+            LOGGER.warning("no doc in db")
+            hits.append(False)
+            continue
+
+        if has_answer(answers, text, tokenizer, match_type):
+            answer_found = True
+        hits.append(answer_found)
+
+    return hits
+
+def calculate_matches(
+    all_docs: Dict[object, Tuple[str, str]],
+    answers: List[List[str]],
+    closest_docs: List[Tuple[List[object], List[float]]],
+    workers_num: int,
+    match_type: str,
+) -> QAMatchStats:
+    """
+    Evaluates answers presence in the set of documents. This function 
+    is supposed to be used with a large collection of documents and results. 
+    It internally forks multiple sub-processes for evaluation and then 
+    merges results.
+    :param all_docs: dictionary of the entire documents database. 
+        doc_id -> (doc_text, title) 
+    :param answers: list of answers's list. One list per question
+    :param closest_docs: document ids of the top results along with their 
+        scores
+    :param workers_num: amount of parallel threads to process data
+    :param match_type: type of answer matching. Refer to has_answer 
+                    code for available options
+    :return: matching information tuple.
+    
+    top_k_hits - a list where the index is the amount of top documents 
+    retrieved and the value is the total amount of
+    valid matches across an entire dataset.
+    questions_doc_hits - more detailed info with answer matches for 
+    every question and every retrieved document
+    """
+    PARALLELISM = True
+    global dpr_all_documents
+    dpr_all_documents = all_docs
+    # logger.info("dpr_all_documents size %d", len(dpr_all_documents))
+
+    tok_opts = {}
+    tokenizer = SimpleTokenizer(**tok_opts)
+
+    LOGGER.info("Matching answers in top docs...")
+    get_score_partial = functools.partial(
+        check_answer, match_type=match_type, tokenizer=tokenizer
+    )
+
+    questions_answers_docs = zip(answers, closest_docs)
+    cosmetic_len = min(len(answers), len(closest_docs))
+
+    processes = ProcessPool(processes=workers_num)
+    scores = processes.map(
+        get_score_partial, 
+        questions_answers_docs,
+    )
+
+    LOGGER.info("Per question validation results len=%d", cosmetic_len)
+    
+    n_docs = len(closest_docs[0][0])
+    top_k_hits = [0] * n_docs
+    for question_hits in scores:
+        best_hit = next((i for i, x in enumerate(question_hits) if x), None)
+        if best_hit is not None:
+            top_k_hits[best_hit:] = [v + 1 for v in top_k_hits[best_hit:]]
+
+    if processes:
+        processes.close()
+        
+    return QAMatchStats(top_k_hits, scores)
+
+
+def validate(
+    passages: Dict[object, Tuple[str, str]],
+    answers: List[List[str]],
+    result_ctx_ids: List[Tuple[List[object], List[float]]],
+    workers_num: int,
+    match_type: str,
+    output_file: IO,
+) -> List[List[bool]]:
+    def tee(text):
+        LOGGER.info(text)
+        output_file.write(text + "\n")
+
+    match_stats = calculate_matches(
+        passages, answers, result_ctx_ids, workers_num, match_type
+    )
+    top_k_hits = match_stats.top_k_hits
+    tee(f"Validation results: top k documents hits {top_k_hits}")
+    top_k_hits = [v / len(result_ctx_ids) for v in top_k_hits]
+    tee(f"Validation results: top k documents hits accuracy {top_k_hits}")
+    return top_k_hits
+
+
+##########################################################################################
+# My code
+##########################################################################################
 functools.lru_cache(maxsize=1)
 def _get_loop_i_extractor():
     """Lazily compile the pattern, and only do it once."""
@@ -49,8 +245,9 @@ def _get_loop_i_extractor():
 def _log_skip_message(message):
     LOGGER.warning(f"{colorama.Fore.YELLOW}{message}{colorama.Style.RESET_ALL}")
 
-
-def prep_retrievals_object(input_folder: PathType) -> Optional[Dict[int, List]]:
+def prep_retrievals_object(
+    input_folder: PathType
+) -> Optional[dict[int, list]]:
     assert input_folder.exists(), input_folder
     retr_outs = list(input_folder.glob("retr_outs_*.jsonl"))
     if not retr_outs:
@@ -255,7 +452,6 @@ def prep_display_args_dict(args):
 
 
 def jsonl_to_table(path, id_, description, N):
-    import itertools
     with jsonl.open(path) as fin:
         data = [x for x in itertools.islice(fin, N)]
     
@@ -280,7 +476,9 @@ def _by_it_no(path: PathType) -> int:
     return int(path.stem.split("_")[-1])
 
 
-def make_hideable_tables(input_dir: Union[Path, str]) -> Optional[Union[str, List[int]]]:
+def make_hideable_tables(
+    input_dir: Union[Path, str]
+) -> Optional[Union[str, list[int]]]:
     input_dir = Path(input_dir)
     
     data_names = ["gen_inputs", "q_aug_outs", "retr_inputs"]
@@ -342,6 +540,8 @@ def display_results(
     input_dir = Path(input_dir)
     args = json.loads((input_copy_dir / "notebook_args.json").read_text())
 
+
+    assert len(results), "No results to display"
     results_tuple = sorted(results.items(), key=lambda pair: pair[0])
     actual_keys = set(list(zip(*results_tuple))[0])
     actual_values = list(zip(*results_tuple))[1]
@@ -419,7 +619,7 @@ def display_results(
 @beartype.beartype
 def load_questions_and_answers(
     cfg: omegaconf.DictConfig, ds_key: str
-) -> Tuple[List[Any], List[Any]]:
+) -> tuple[list[Any], list[Any]]:
     questions = []
     question_answers = []
     qa_src = hydra.utils.instantiate(cfg.datasets[ds_key])
@@ -437,19 +637,27 @@ def analyse(
     root: Union[str, Path],
     input_copy_dir: Union[str, Path],
 ):
-    # These imports take a while, so we do them here
-    import dense_retriever
-    import common_retriever
-    import iterated_utils as utils
+    ######################################################################
+    # These imports take a while, so we only do them if we have to
+    ######################################################################
+    with warnings.catch_warnings():
+        warnings.simplefilter(
+            "ignore", 
+            category=beartype.roar.BeartypeDecorHintPepDeprecatedWarning
+        )
+        import common_retriever  # type: ignore
+
+        import iterated_utils as utils  # type: ignore
     print("Done with all imports")
 
+    ########################################################################
+    # Load the config and the dataset
+    ########################################################################
     dpr_conf_path = root / "DPR" / "conf"
     cfg = common_retriever.build_cfg(dpr_conf_path)
-
-    with (root / "jobs" / "cache" / "all_passages.pkl").open("rb") as fin:
-        passages = pickle.load(fin)
-
+    retrieval_client = dpr_client.UnaryClient(0, 0)
     _, question_answers = load_questions_and_answers(cfg, "nq_dev")
+
 
     ########################################################################
     # Start working.
@@ -465,13 +673,11 @@ def analyse(
     ########################################################################
     results = {}
     for loop_i, retrieved in sorted(retrievals.items(), key=lambda pair: pair[0]):
-        if len(question_answers) != len(retrieved):
-            rich.print(f"Breaking at {loop_i} because the lengths don't match.")
-            break
+        # utils.check_equal(len(question_answers), len(retrieved))
         
         with (out_file / f"validate_{loop_i}.txt").open("w") as output_file:
-            output = dense_retriever.validate(
-                passages=passages,
+            output = validate(
+                passages=retrieval_client.passages,
                 answers=question_answers,
                 result_ctx_ids=list(zip(retrieved, [None for _ in retrieved])),
                 workers_num=os.cpu_count(),
@@ -479,7 +685,6 @@ def analyse(
                 output_file=output_file,
             )
             results[loop_i] = output
-
 
     assert isinstance(results, dict), type(results).mro()
     return results
@@ -493,28 +698,29 @@ def _segment(sentence):
 def compute_gen_distance(args, input_folder):
     """Compute the distance between each of the generated segments"""
     # Load the generated segments
-    input_folder = Path(input_folder)
+    input_folder: Final = Path(input_folder)
     assert input_folder.exists(), input_folder
-    targets = list(input_folder.glob("q_aug_outs_*.jsonl"))
-    assert targets
+    targets: Final = list(input_folder.glob("q_aug_outs_*.jsonl"))
+    assert len(targets) > 0, "`targets` is empty"
+    assert targets is not None, "`targets` is None"
     LOGGER.info(targets)
 
-    all_self_bleus = []
+    all_self_bleus: Final = []
 
     for file in targets:
         with jsonl.open(input_folder / file) as f:
-            all_lines = list(f)
+            all_lines: Final = list(f)
             rich.print(f"[bold green]{len(all_lines)} in file `{file.name}`")
-            self_bleus_per_file = []
-            line_lengths = collections.Counter((len(x) for x in all_lines))
+            self_bleus_per_file: Final = []
+            line_lengths: Final = collections.Counter((len(x) for x in all_lines))
             rich.print(f"[bold green]{line_lengths = }")
             for all_entries in all_lines:
                 for entry in all_entries:
                     # print(f"{entry = }")
-                    all_words = set()
-                    sets = []
-                    self_bleus = []
-                    segmented = [_segment(x) for x in entry]
+                    all_words: Final = set()
+                    sets: Final = []
+                    self_bleus: Final = []
+                    segmented: Final = [_segment(x) for x in entry]
 
                     for i, gen_words in enumerate(segmented):
                         sets.append(gen_words)
@@ -581,12 +787,12 @@ def parse_results_files(results_dir):
 def main(input_folder_name, display_only=False):
     assert isinstance(display_only, bool), type(display_only).mro()
 
-    format_info = (
+    format_info: Final = (
         "[%(levelname)s] (%(asctime)s) "
         "{%(name)s->%(funcName)s:%(lineno)d}:\n"
     )
 
-    logging_format = (
+    logging_format: Final = (
         colorama.Fore.CYAN +
         format_info +
         colorama.Style.RESET_ALL +
@@ -626,12 +832,8 @@ def main(input_folder_name, display_only=False):
     ########################################################################
     # Parse the files
     ########################################################################
-    ROOT = Path("/home/mila/g/gagnonju/IteratedDecoding/")
-    RETRIEVE_AND_DECODE_ROOT = ROOT / "jobs" / "retrieve_and_decode"
-    RETRIEVE_AND_DECODE_OUTPUT = RETRIEVE_AND_DECODE_ROOT / "iterated_decoding_output"
-
-    output_dir_name = input_folder_name
-    input_folder = RETRIEVE_AND_DECODE_OUTPUT / input_folder_name
+    output_dir_name: Final = input_folder_name
+    input_folder: Final = RETRIEVE_AND_DECODE_OUTPUT / input_folder_name
     assert input_folder.exists(), input_folder
 
     out_file, input_copy_dir = prep_directories(
@@ -640,6 +842,7 @@ def main(input_folder_name, display_only=False):
         output_dir_name=output_dir_name, 
         display_only=display_only,
     )
+
 
     if display_only:
         # Parse the results files
@@ -652,14 +855,12 @@ def main(input_folder_name, display_only=False):
         )
     
     if results is None:
-        
         return
 
     assert isinstance(results, dict), type(results).mro()
     display_results(results, out_file, input_copy_dir, input_folder)
     rich.print("[bold green]DONE!")
     # compute_gen_distance(args, input_folder)
-
 
 
 if __name__ == "__main__":

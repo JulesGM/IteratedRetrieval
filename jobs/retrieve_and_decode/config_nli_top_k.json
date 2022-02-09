@@ -6,6 +6,7 @@
     "max_loop_n": 3,
     "selection_mode": "nli_top_k",
     "augmentation_mode": "concatenate",
+    "oracle_mode": false,
 
     "decoding_conf_query_aug": {
         "max_length": 40,

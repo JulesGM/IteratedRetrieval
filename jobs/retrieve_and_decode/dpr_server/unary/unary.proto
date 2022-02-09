@@ -1,0 +1,43 @@
+
+syntax = "proto3";
+
+package unary;
+
+service Unary{
+    rpc Retrieve(RetrieveQuery) returns (RetrieveResponse) {}
+    rpc GetPassages(GetPassagesQuery) returns (GetPassagesResponse) {}
+    rpc GetLenPassages(GetLenPassagesQuery) returns (GetLenPassagesResponse) {}
+}
+
+message GetLenPassagesQuery {
+}
+
+message GetLenPassagesResponse {
+    int32 len = 1;
+}
+
+message ListOfStrings {
+    repeated string strs = 1;
+}
+
+message RetrieveQuery {
+    int64 n_docs = 1;
+    repeated string questions = 2;
+    int64 retrieval_max_size = 3;
+}
+
+message RetrieveResponse {
+    repeated ListOfStrings ids = 1;
+    bytes scores = 2;
+    repeated ListOfStrings titles = 3;
+    repeated ListOfStrings texts = 4;
+}
+
+message GetPassagesQuery {
+    repeated string ids = 1;
+}
+
+message GetPassagesResponse {
+    repeated string titles = 1;
+    repeated string texts = 2;
+}

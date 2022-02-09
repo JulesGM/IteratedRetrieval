@@ -1,9 +1,12 @@
+from __future__ import annotations
+
+
 print("(Re)/Loading iterated_utils.py")
 import collections
 import colorama
 import contextlib
 import enum
-import json
+import inspect
 import logging
 import operator
 from pathlib import Path
@@ -11,17 +14,18 @@ import time
 import types
 from typing import *
 
-SCRIPT_DIR = Path(__file__).absolute().parent
-LOGGER = logging.getLogger(__name__)
+SCRIPT_DIR: Final = Path(__file__).absolute().parent
+LOGGER: Final = logging.getLogger(__name__)
 
 import beartype
-import colored_traceback.auto
+try:
+    import colored_traceback.auto
+except ImportError:
+    pass
 import colorama
-
+import more_itertools
 import numpy as np
-print("importing torch")
 import torch
-print("done importing torch")
 import typeguard
 
 
@@ -31,9 +35,50 @@ except ImportError:
     import json
 
 
-def tensor_chunked(buf, chunk):
-    for start in range(0, len(buf), chunk):
-        yield buf[start:start + chunk]
+def dict_unzip(dict_, equal=False) -> Generator[dict, None, None]:
+    """Takes a dict with sequences as values and yields a sequence of dicts with the values.
+    
+    Example:
+    a = {"a": [1, 2], "b": [3, 4], "c": [5, 6]}
+    dict_unzip(a) -> [{"a": 1, "b": 3, "c": 5}, {"a": 2, "b": 4, "c": 6}]
+    
+    """
+    ordered_keys = list(dict_)
+    ordered_values = [dict_[k] for k in ordered_keys]
+    
+    if equal:
+        unzipped_ordered_values = more_itertools.zip_equal(*ordered_values)
+    else:
+        unzipped_ordered_values = zip(*ordered_values)
+
+    for values in unzipped_ordered_values:
+        dict_with_single_value = dict(zip(ordered_keys, values))
+        yield dict_with_single_value
+
+
+def check_equal_signatures(fn_a, fn_b):
+    """ Checks that fn_a and fn_b have parameters of the same names and param type.
+    Does not currently check for default values or annotations.
+    """
+    sig_a = inspect.signature(fn_a)
+    sig_b = inspect.signature(fn_b)
+
+    params_seen = set()
+    for name, param in sig_a.parameters.items():
+        params_seen.add(name)
+        assert name in sig_b.parameters, (name, sig_b.parameters)
+        check_equal(param.kind, sig_b.parameters[name].kind)
+    
+    # If all of the params of sig a are in sig b, if sig a and 
+    # sig b have the same number of params, then sig a and sig b
+    # are equal.
+    assert len(params_seen) == len(sig_b.parameters), (
+        params_seen, sig_b.parameters
+    )
+
+def tensor_chunked(buf: Sequence[Any], chunk_size: int) -> Generator[Sequence[Any], None, None]:
+    for start in range(0, len(buf), chunk_size):
+        yield buf[start:start + chunk_size]
 
 
 class ValueEnumMeta(enum.EnumMeta):
@@ -207,14 +252,14 @@ def timestamp() -> str:
 
 
 @contextlib.contextmanager
-def time_this(title: str, no_start: bool = False) -> None:
+def time_this(title: str, no_start: bool = False) -> Generator[None, None, None]:
     start = time.monotonic()
     bleu = colorama.Fore.BLUE
     green = colorama.Fore.GREEN
     reset = colorama.Style.RESET_ALL
     if not no_start:
         LOGGER.info(f"{bleu}Starting:{reset} {title}")
-    yield "pizza"
+    yield None
     now = time.monotonic() - start
     LOGGER.info(f"{green}Done:{reset} {title}, {now:0.2f}s")
 
@@ -277,26 +322,26 @@ def class_checker(cls):
 ###############################################################################
 # Advanced matrix operations
 ###############################################################################
-def topk_w_torch(scores_np: np.ndarray, k, dim):
-    assert scores_np.ndim == 2, scores_np.ndim
-    other_dims = tuple([x for x in range(scores_np.ndim) if x != dim])
+# def topk_w_torch(scores_np: np.ndarray, k, dim):
+#     assert scores_np.ndim == 2, scores_np.ndim
+#     other_dims = tuple([x for x in range(scores_np.ndim) if x != dim])
 
-    scores_pt = torch.Tensor(scores_np)
-    try:
-        end = torch.topk(scores_pt, k=k, dim=dim).indices.numpy()
-    except RuntimeError as err:
-        raise add_to_err(
-            err,
-            f"{scores_pt.shape = }\n"
-            f"{dim = }\n"
-            f"{k = }\n"
-        )
+#     scores_pt = torch.Tensor(scores_np)
+#     try:
+#         end = torch.topk(scores_pt, k=k, dim=dim).indices.numpy()
+#     except RuntimeError as err:
+#         raise add_to_err(
+#             err,
+#             f"{scores_pt.shape = }\n"
+#             f"{dim = }\n"
+#             f"{k = }\n"
+#         )
 
-    if dim == 0:
-        end = end.T
+#     if dim == 0:
+#         end = end.T
 
-    check_shape(end.shape, tuple(scores.shape[x] for x in other_dims) + (k,))
-    return end
+#     check_shape(end.shape, tuple(scores.shape[x] for x in other_dims) + (k,))
+#     return end
     
 
 
@@ -340,7 +385,7 @@ def top_k_join(
 
     output = []
     for batch_i in range(len(scores)):
-        per_id = collections.defaultdict(int)   
+        per_id: Dict[str, int] = collections.defaultdict(int)   
         for query_i in range(len(scores[batch_i])):
             for retrieved_i in range(len(scores[batch_i][query_i])):
                 index = indices[batch_i, query_i, retrieved_i]
@@ -363,10 +408,11 @@ def top_k_join(
         output.append(top_k_keys)
 
     check_equal(len(output), scores.shape[0])
-    output = np.asarray(output)
-    check_shape(output.shape, (scores.shape[0], final_qty))
+    output_np = np.asarray(output)
+    del output
+    check_shape(output_np.shape, (scores.shape[0], final_qty))
 
-    return output
+    return output_np
 
 
 def top_k_sum(
@@ -416,39 +462,58 @@ if __name__ == "__main__":
     #         assert np.all(cmp_pt), f"{np.mean(cmp_pt) = :0.1%}, {i = }, {j = }"
     # print("top_k passed")
 
-    indices = np.array(
-        [   
-            [
-                [0, 3, 2, 10], 
-                [0, 1, 2, 3], 
-                [0, 3, 2, 1],
-            ],
-            [
-                [0, 1, 2, 3], 
-                [0, 1, 2, 3], 
-                [0, 14, 2, 3],
-            ]
-        ]
-    )
-    scores = np.array(
-        [
-            [
-                [0.1, 0.2, 0.3, 0.7], 
-                [0.1, 0.2, 0.3, 0.4], 
-                [0.1, 0.9, 0.3, 0.4],
-            ],
-            [
-                [0.4, 0.3, 0.2, 0.1], 
-                [0.4, 0.3, 0.2, 0.1], 
-                [0.4, 0.9, 0.2, 0.1],
-            ]
-        ]
-    )
-    print(f"{scores.shape = }")
-    final_qty = 3
-    indices_pt = top_k_sum(scores, indices, final_qty)
-    print(f"{indices_pt.shape = }")
-    print(indices_pt)
-    print("done")
+    # indices = np.array(
+    #     [   
+    #         [
+    #             [0, 3, 2, 10], 
+    #             [0, 1, 2, 3], 
+    #             [0, 3, 2, 1],
+    #         ],
+    #         [
+    #             [0, 1, 2, 3], 
+    #             [0, 1, 2, 3], 
+    #             [0, 14, 2, 3],
+    #         ]
+    #     ]
+    # )
+    # scores = np.array(
+    #     [
+    #         [
+    #             [0.1, 0.2, 0.3, 0.7], 
+    #             [0.1, 0.2, 0.3, 0.4], 
+    #             [0.1, 0.9, 0.3, 0.4],
+    #         ],
+    #         [
+    #             [0.4, 0.3, 0.2, 0.1], 
+    #             [0.4, 0.3, 0.2, 0.1], 
+    #             [0.4, 0.9, 0.2, 0.1],
+    #         ]
+    #     ]
+    # )
+    # print(f"{scores.shape = }")
+    # final_qty = 3
+    # indices_pt = top_k_sum(scores, indices, final_qty)
+    # print(f"{indices_pt.shape = }")
+    # print(indices_pt)
+    # print("done")
 
 
+    d = dict(aaa=range(10), bbb=range(20, 30), ccc=range(50, 60))
+    for i, d_ in enumerate(dict_unzip(d, equal=True)):
+        print(i, d_)
+
+    print("")
+    d = dict(aaa=range(10), bbb=range(20, 25), ccc=range(50, 60))
+    for i, d_ in enumerate(dict_unzip(d, equal=False)):
+        print(i, d_)
+    
+    print("")
+    
+    try:
+        d = dict(aaa=range(10), bbb=range(20, 25), ccc=range(50, 60))
+        for i, d_ in enumerate(dict_unzip(d, equal=True)):
+            print(i, d_)
+    except more_itertools.more.UnequalIterablesError:
+        print("UnequalIterablesError, as expected. ")
+
+    print("PASSED")

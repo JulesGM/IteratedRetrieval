@@ -1,20 +1,12 @@
+from __future__ import annotations
 print("(Re)/Loading iterated_retrieval.py")
 
 # Standard library
-import abc
 import argparse
-import collections
-import contextlib
-import copy
 import dataclasses
-import glob
-import importlib
-
-from transformers.file_utils import ENV_VARS_TRUE_AND_AUTO_VALUES
-from transformers.tokenization_utils_base import ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
 
 try:
-    import ujson as json
+    import ujson as json  # type: ignore
 except ImportError:
     import json
 
@@ -28,12 +20,8 @@ import sys
 import time
 from typing import *
 
-SCRIPT_DIR = Path(__file__).absolute().parent
-
 # Third party
 import beartype
-import colorama
-import hydra
 import jsonlines
 import more_itertools
 import numpy as np
@@ -41,92 +29,34 @@ import omegaconf
 import rich
 import torch
 import transformers
-import tqdm
+import tqdm  # type: ignore
 
 # First Party
-import iterated_utils as utils
 import common_retriever
+import iterated_utils as utils
+import selection_techniques
+import dpr_server
 
-ROOT_PATH = SCRIPT_DIR.parent.parent
-GAR_PATH = ROOT_PATH / "GAR/gar"
+
+SCRIPT_DIR: Final = Path(__file__).absolute().parent
+ROOT_PATH: Final = SCRIPT_DIR.parent.parent
+GAR_PATH: Final = ROOT_PATH / "GAR" / "gar"
+DPR_PATH: Final = ROOT_PATH / "DPR"
+CONF_PATH: Final = DPR_PATH / "conf"
 sys.path.insert(0, str(GAR_PATH))
-DPR_PATH = ROOT_PATH / "DPR"
-CONF_PATH = DPR_PATH / "conf"
 sys.path.insert(0, str(DPR_PATH))
 
-import train_generator
-import dpr.utils.model_utils
-import dense_retriever
-import utils_gen
+import train_generator  # type: ignore
+import dense_retriever  # type: ignore
+import utils_gen  # type: ignore
 
 
-LOGGER = logging.getLogger(__name__)
+
+
+LOGGER: Final = logging.getLogger(__name__)
 LOGGER.info(f"(Re)loaded {Path(__file__).name}")
-LOGGER.info(f"{dense_retriever.__file__ = }")
 
-
-PathType = Union[str, Path]
-
-
-class NLI:
-    ENTAILMENT_POS = 0
-    NEUTRAL_POS = 1
-    CONTRADICTION_POS = 2
-
-
-    def __init__(self, ) -> None:    
-        self.hg_model_hub_name = "ynie/roberta-large-snli_mnli_fever_anli_R1_R2_R3-nli"
-        # self.hg_model_hub_name = "ynie/albert-xxlarge-v2-snli_mnli_fever_anli_R1_R2_R3-nli" # Didn't work
-        # self.hg_model_hub_name = "ynie/bart-large-snli_mnli_fever_anli_R1_R2_R3-nli"
-        # self.hg_model_hub_name = "ynie/electra-large-discriminator-snli_mnli_fever_anli_R1_R2_R3-nli"
-        # self.hg_model_hub_name = "ynie/xlnet-large-cased-snli_mnli_fever_anli_R1_R2_R3-nli"
-
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-            self.hg_model_hub_name
-        )
-        LOGGER.info(f"Loading model: \"{self.hg_model_hub_name}\"")
-        self.model = transformers.AutoModelForSequenceClassification.from_pretrained(
-            self.hg_model_hub_name
-        )
-        LOGGER.info("Model loaded.")
-
-        self.call_args = []
-        self.call_kwargs = dict()
-        self.tokenizer_args = []
-        self.tokenizer_kwargs = dict(
-            pad_to_max_length=True,
-            return_tensors="pt",
-            return_token_type_ids=True, 
-            truncation=True,
-        )
-        
-        
-    @classmethod
-    def _all(cls, preds):
-        return preds[:, cls.ENTAILMENT_POS]
-
-
-    def __call__(self, contexts, questions, answers) -> Any:
-        tokenizer_batch = self.tokenizer.batch_encode_plus(
-            contexts, 
-            questions + answers, 
-            *self.tokenizer_args, 
-            **self.tokenizer_kwargs,
-        )
-
-        raw_preds = self.model(
-            tokenizer_batch, 
-            *self.call_args, 
-            **self.call_kwargs
-        )   
-        assert raw_preds.ndims == 2, raw_preds.ndims
-        assert raw_preds.shape[1] == 3, raw_preds.shape
-
-        preds = self._all(raw_preds)
-
-        assert preds.ndims == 1, preds.shape
-
-        return preds
+PathType: Final = Union[str, Path]
 
 
 def build_tokenizers_and_datasets(
@@ -134,7 +64,8 @@ def build_tokenizers_and_datasets(
     data_dir,
     max_target_len,
     max_source_len,
-    cv_set
+    cv_set, 
+    use_subset,
 ):
 
     ###############################################################################
@@ -158,16 +89,18 @@ def build_tokenizers_and_datasets(
                 max_source_length=max_source_len,
                 max_target_length=max_target_len,
             )
+        collate_fn: Final = dataset.collate_fn
 
-        # subset = torch.utils.data.Subset(
-        #     dataset,
-        #     list(range(generation_batch_size * 5))
-        # )
+        if use_subset:
+            dataset = torch.utils.data.Subset(
+                dataset,
+                list(range(generation_batch_size * 5))
+            )
 
         dataloader = torch.utils.data.DataLoader(
             dataset,
             batch_size=generation_batch_size,
-            collate_fn=dataset.collate_fn,
+            collate_fn=collate_fn,
             shuffle=False,  # DO NOT CHANGE THIS! It fucks with the metrics. There is no reason to shuffle anyways at inference.
             num_workers=0,
         )
@@ -204,7 +137,8 @@ class DecoderConf:
     def validate(self) -> None:
         if self.repetition_penalty <= 1.0:
             raise ValueError(
-                f"{self.repetition_penalty = }. You likely want repetition_penalty to be > 1."
+                f"{self.repetition_penalty = }. "
+                f"You likely want repetition_penalty to be > 1."
             )
 
         if not self.is_sample() and self.num_beams < self.num_return_sequences:
@@ -269,10 +203,10 @@ def compute_score_reference(probs, generated_ids, tokenizer):
     return output, winner_probs
 
 
-def compute_score_torch(probs, generated_ids, tokenizer, winner_probs_ref):
-
-    winner_probs_ref = torch.FloatTensor(winner_probs_ref).cuda()    
-    winner_probs_torch = torch.take_along_dim(probs, generated_ids.unsqueeze(-1), dim=2,).squeeze()
+def compute_score_torch(probs, generated_ids, tokenizer):
+    winner_probs_torch = torch.take_along_dim(
+        probs, generated_ids.unsqueeze(-1), dim=2,
+    ).squeeze()
     
     assert winner_probs_torch.size() == generated_ids.size(), (
         winner_probs_torch.size(), generated_ids.size()
@@ -283,25 +217,18 @@ def compute_score_torch(probs, generated_ids, tokenizer, winner_probs_ref):
     assert seq_lens.size() == (generated_ids.size(0),)
 
     masked_winner_probs_torch = winner_probs_torch * mask
-    masked_winner_probs_ref = winner_probs_ref * mask
-
-    assert torch.allclose(masked_winner_probs_torch, masked_winner_probs_ref), (
-        f"{masked_winner_probs_torch = }", 
-        f"{masked_winner_probs_ref = }", 
-        f"{mask = }",
-        f"{winner_probs_torch.dtype = }", 
-        f"{winner_probs_ref.dtype = }",
-    )
 
     scores = torch.sum(masked_winner_probs_torch, 1) / seq_lens.float()
     return scores
 
 
-# @beartype.beartype
 def decode(
     model: train_generator.SummarizationTrainer,
     batch: Mapping[str, torch.Tensor],
-    tokenizer: Union[transformers.PreTrainedTokenizer, transformers.PreTrainedTokenizerFast],
+    tokenizer: Union[
+        transformers.PreTrainedTokenizer, 
+        transformers.PreTrainedTokenizerFast
+    ],
     decoding_conf: DecoderConf,
 ) -> Tuple[np.ndarray, np.ndarray]:
 
@@ -323,17 +250,12 @@ def decode(
     )
     probs = model.model(generated_ids)[0]
     
-    start_reference = time.monotonic()
-    scores_ref, winner_probs = compute_score_reference(probs, generated_ids, tokenizer)
-    end_reference = time.monotonic() - start_reference
-    start_torch = time.monotonic()
-    scores_torch = compute_score_torch(probs, generated_ids, tokenizer, winner_probs)
-    end_torch = time.monotonic() - start_torch
-    rich.print(
-        f"[cyan bold]Reference: {end_reference}s, "
-        f"Torch: {end_torch}s"
-    )
-    assert torch.allclose(scores_ref, scores_torch), (scores_ref, scores_torch)
+    scores_torch = compute_score_torch(probs, generated_ids, tokenizer)
+    
+    # start_reference = time.monotonic()
+    # scores_ref, winner_probs = compute_score_reference(probs, generated_ids, tokenizer)
+    # end_reference = time.monotonic() - start_reference
+    # assert torch.allclose(scores_ref, scores_torch), (scores_ref, scores_torch)
 
     scores = scores_torch
 
@@ -357,9 +279,12 @@ def clean_bart_decode(output, tokenizer_bart) -> str:
     ).strip()
 
 
-def question_generator(dataloader_, tokenizer_bart, information, oracle_mode) -> Generator[str, None, None]:
-    """
-    This is to enforce consistence with the training of the BART models.
+def batched_question_generator(
+    dataloader_, tokenizer_bart, information, oracle_mode,
+) -> Generator[Tuple[List[str], List[str]], None, None]:
+    """ Create the questions and the targets.
+    Decodes the ids into text.
+    This is unnecessarily slow, but it is accurate. Temporary.
     """
     for data_dict in tqdm.tqdm(
         dataloader_, desc=f"{information} question_generator"
@@ -379,8 +304,7 @@ def question_generator(dataloader_, tokenizer_bart, information, oracle_mode) ->
                 tokenizer_bart,
             )
             for target_id in target_ids
-        ]
-        
+        ]        
 
         if oracle_mode:
             for target_entry in target_text:
@@ -389,8 +313,23 @@ def question_generator(dataloader_, tokenizer_bart, information, oracle_mode) ->
         yield question_text, target_text
 
 
+def individual_question_generator(
+    dataloader_, tokenizer_bart, information, oracle_mode,
+) -> Generator[str, None, None]:
+    """ Create the questions and the targets.
+    Decodes the ids into text.
+    This is unnecessarily slow, but it is accurate. Temporary.
+    """
+    gen = batched_question_generator(
+        dataloader_, tokenizer_bart, information, oracle_mode
+    )
+    for batch in gen:
+        questions = batch[0]
+        yield from questions
+
+
 def write_contexts(
-    all_contexts: Dict[str, str],
+    retrieval_client,
     context_ids: List[str],
     out_path: str,
 ) -> None:
@@ -425,239 +364,6 @@ def print_generation(
     LOGGER.info(f"{title}: {tokenizer.decode(input_ids)}")
 
 
-def build_models(
-    reader_model_path, query_aug_model_path: PathType,
-    ) -> Tuple[train_generator.SummarizationTrainer, train_generator.SummarizationTrainer]:
-
-    assert isinstance(query_aug_model_path, (str, Path)), type(query_aug_model_path).mro()
-    # assert isinstance(reader_model_path, (str, Path)), type(reader_model_path).mro()
-
-    ###############################################################################
-    # Load query model
-    ###############################################################################
-    with utils.time_this("query_aug_model.load_from_checkpoint"):
-        query_aug_model = train_generator.SummarizationTrainer.load_from_checkpoint(
-            str(query_aug_model_path)
-        )
-
-    # ###############################################################################
-    # # Load inference model
-    # ###############################################################################
-    # with utils.time_this("reader_model.load_from_checkpoint"):
-    #     reader_model = train_generator.SummarizationTrainer.load_from_checkpoint(
-    #         str(reader_model_path)
-    #     )
-
-    return query_aug_model, None
-
-
-###############################################################################
-# Specific to selection technique
-###############################################################################
-@utils.class_checker
-@dataclasses.dataclass
-class SelectionTechniqueChecksInfo:
-    batch_size: int
-    num_sequences: int
-    n_docs: int
-    loop_i: int
-
-
-
-class SelectionTechnique(abc.ABC):
-    def __init__(self):
-        pass
-
-
-    @final
-    def select(
-        self,
-        *,
-        top_retr_ids_np: np.ndarray,
-        scores_retr_np: np.ndarray,
-        final_num_contexts: int,
-        query_scores_batch: np.ndarray,
-        checks_info: SelectionTechniqueChecksInfo,
-        is_first_loop: bool,
-        question_text: List[str],
-        retr_text: List[str],
-        query_aug_text: List[str],
-    ):
-        utils.check_shape(top_retr_ids_np.shape, (
-            checks_info.batch_size, 
-            checks_info.num_sequences, 
-            checks_info.n_docs,
-        ))
-
-        effective_batch_size, queries_per_question, n_docs = top_retr_ids_np.shape
-
-        output = self._select(
-            top_retr_ids_np,
-            scores_retr_np,
-            final_num_contexts,
-            query_scores_batch,
-            checks_info,
-            is_first_loop,
-            question_text,
-            retr_text,
-            query_aug_text,
-            effective_batch_size,
-            queries_per_question,
-            n_docs,
-        )
-
-        # Shape Verification
-        try:
-            utils.check_shape(
-                output.shape, (checks_info.batch_size, final_num_contexts)
-            )
-        except ValueError as err:
-            raise utils.add_to_err(
-                err,
-                f"\t- {checks_info.batch_size = }\n"
-                f"\t- {checks_info.num_sequences = }\n"
-                f"\t- {checks_info.n_docs = }\n"
-                f"\t- {checks_info.loop_i = }\n"
-            )
-
-        return output
-
-
-    @abc.abstractmethod
-    def _select(
-        self,
-        top_retr_ids_np: np.ndarray,
-        scores_retr_np: np.ndarray,
-        final_num_contexts: int,
-        query_scores_batch: np.ndarray,
-        checks_info: SelectionTechniqueChecksInfo,
-        is_first_loop: bool,
-        question_text: List[str],
-        retr_text: List[str],
-        query_aug_text: List[str],
-        effective_batch_size: int,
-        queries_per_question: int,
-        n_docs: int,
-    ):
-        pass
-
-
-    @final
-    def __call__(self, *args: Any, **kwds: Any) -> Any:
-        return self.select(*args, **kwds)
-
-
-class AugTopK(SelectionTechnique):
-    def _select(
-        self,
-        top_retr_ids_np: np.ndarray,
-        scores_retr_np: np.ndarray,
-        final_num_contexts: int,
-        query_scores_batch: np.ndarray,
-        checks_info: SelectionTechniqueChecksInfo,
-        is_first_loop: bool,
-        question_text: List[str],
-        retr_text: List[str],
-        query_aug_text: List[str],
-        effective_batch_size: int,
-        queries_per_question: int,
-        n_docs: int,
-    ):
-        if not is_first_loop:    
-            assert query_scores_batch is not None
-            assert scores_retr_np is not None
-            assert (
-                query_scores_batch.dtype == np.float32 or 
-                query_scores_batch.dtype == np.float64
-            ), f"query_scores_batch.dtype = {query_scores_batch.dtype}"
-            assert (
-                scores_retr_np.dtype == np.float32 or 
-                scores_retr_np.dtype == np.float64
-            ), f"scores_retr_np.dtype = {scores_retr_np.dtype}"
-
-            
-            query_scores_batch = query_scores_batch.squeeze(2)
-
-            utils.check_shape(
-                scores_retr_np.shape, 
-                (effective_batch_size, queries_per_question, n_docs),
-            )
-            utils.check_shape(
-                query_scores_batch.shape,
-                (effective_batch_size, queries_per_question),
-            )
-
-            unsqueezed_query_scores_batch = np.expand_dims(query_scores_batch, 2)
-            return utils.top_k_max(
-                scores=scores_retr_np * unsqueezed_query_scores_batch,
-                indices=top_retr_ids_np,
-                final_qty=final_num_contexts,
-            )
-
-        else:
-            return utils.top_k_max(
-                scores=scores_retr_np,
-                indices=top_retr_ids_np,
-                final_qty=final_num_contexts,
-            )
-
-
-class ArgMaxTopK(SelectionTechnique):
-    def _select(
-        self,
-        top_retr_ids_np: np.ndarray,
-        scores_retr_np: np.ndarray,
-        final_num_contexts: int,
-        *args, **kwargs
-    ):
-        return utils.top_k_max(
-            scores=scores_retr_np,
-            indices=top_retr_ids_np,
-            final_qty=final_num_contexts,
-        )
-
-
-class NLITopK(SelectionTechnique):
-    def __init__(self):
-        super().__init__()
-        self.nli_context = NLI()
-
-
-    def _select(
-        self,
-        top_retr_ids_np: np.ndarray,
-        scores_retr_np: np.ndarray,
-        final_num_contexts: int,
-        query_scores_batch: np.ndarray,
-        checks_info: SelectionTechniqueChecksInfo,
-        is_first_loop: bool,
-        question_text: List[str],
-        retr_text: List[str],
-        query_aug_text: List[str],
-        effective_batch_size: int,
-        queries_per_question: int,
-        n_docs: int,
-    ):
-        
-        nli_scores = self.nli_context(
-            context_text=retr_text, 
-            quesiton_text=question_text, 
-            answer_text=query_aug_text
-        )
-        return utils.top_k_max(
-            scores=scores_retr_np * nli_scores,
-            indices=top_retr_ids_np,
-            final_qty=final_num_contexts,
-        )
-
-SELECTION_TECHNIQUE_TYPES = dict(
-        aug_top_k=AugTopK,
-        arg_max_top_k=ArgMaxTopK,
-        nli_top_k=NLITopK,
-    )
-
-
-
 class AugmentationModes(utils.StrValueEnum):
     CONCATENATE = "concatenate"
     JUST_USE_AUG = "just_use_aug"
@@ -680,8 +386,8 @@ class InferenceFunctions:
         question_dataloader, 
         tokenizer_bart, 
         loop_i: int, 
-        query_aug_text_all_loops, 
-        query_aug_score_all_loops, 
+        current_query_augs, 
+        current_query_aug_scores, 
         aug_method, 
         decoding_conf_query_aug, 
         augmentation_mode, 
@@ -689,11 +395,13 @@ class InferenceFunctions:
         output_paths: Dict[str, PathType],
         oracle_mode: bool,
     ):
+        """  Build the queries to be used for retrieval.
+        """
         if oracle_mode:
-            assert loop_i == 0, loop_i
+            utils.check_equal(loop_i, 0)
 
         all_queries_this_loop = []
-        questions_batching_generator = question_generator(
+        questions_batching_generator = batched_question_generator(
             question_dataloader,
             tokenizer_bart,
             f"[{loop_i = }] Preparing the retrieval queries :: ",
@@ -701,33 +409,30 @@ class InferenceFunctions:
         )
 
         if loop_i == 0:
-            query_batch_generator = (
+            query_batch_generator = [
                 None for _ in range(len(question_dataloader))
-            )
-            query_batch_scores_generator = (
+            ]
+            query_batch_scores_generator = [
                 None for _ in range(len(question_dataloader))
-            )
+            ]
 
         else:
             query_batch_generator = more_itertools.chunked(
-                query_aug_text_all_loops[-1],
+                current_query_augs,
                 question_dataloader.batch_size,
             )
             query_batch_scores_generator = more_itertools.chunked(
-                query_aug_score_all_loops[-1],
+                current_query_aug_scores,
                 question_dataloader.batch_size,
             )
         
         
-        for batch_i, (
-            (questions_batch, targets_batch), query_aug_batch, query_aug_batch_scores,
-        ) in enumerate(
-            more_itertools.zip_equal(
-                questions_batching_generator,
-                query_batch_generator,
-                query_batch_scores_generator,
-                ),
-            ):
+        for ((questions_batch, targets_batch), query_aug_batch, query_aug_batch_scores,
+        ) in more_itertools.zip_equal(
+            questions_batching_generator,
+            query_batch_generator,
+            query_batch_scores_generator,
+        ):
 
             if loop_i == 0 and not oracle_mode:
                 assert query_aug_batch is None
@@ -736,8 +441,10 @@ class InferenceFunctions:
                     [[x] for x in questions_batch]
                 )
             else:
+                assert query_aug_batch is not None
+
                 if not oracle_mode:
-                    query_aug_batch = np.array(query_aug_batch, dtype="object")
+                    query_aug_batch = np.array(query_aug_batch, dtype=np.object_)
 
                 # Use the query augs to augment the question.
                 if aug_method == "RETRIEVE_ALL_INDIVIDUALLY":
@@ -753,14 +460,14 @@ class InferenceFunctions:
 
                     else:
                         assert query_aug_batch is None, query_aug_batch
-                        query_aug_batch = [None for _ in range(len(questions_batch))]
+                        query_aug_batch = [
+                            None for _ in range(len(questions_batch))
+                        ]
 
-                    for i, (question, query_set, target) in enumerate(
-                        more_itertools.zip_equal(
-                            questions_batch,
-                            query_aug_batch,
-                            targets_batch,
-                        )
+                    for question, query_set, target in more_itertools.zip_equal(
+                        questions_batch,
+                        query_aug_batch,
+                        targets_batch,
                     ):
                     
                         per_question = []
@@ -799,18 +506,16 @@ class InferenceFunctions:
         loop_i: int,
         retriever_batch_size: int,
         decoding_conf_query_aug,
-        all_queries_this_loop,
-        all_query_augs_this_loop,
-        query_aug_score_all_loops,
+        queries_this_loop,
+        questions,
+        query_augs_this_loop,
+        query_aug_scores_this_loop,
         aug_method,
-        retriever,
-        all_passages,
-        special_query_token,
+        retrieval_client,
         n_docs: int,
         final_num_contexts: int,
-        selection_mode,
         output_paths,
-        selection_context: SelectionTechnique,
+        selection_context: selection_techniques.SelectionTechnique,
         oracle_mode: bool,
         retrieval_max_size: int,
     ):
@@ -827,53 +532,73 @@ class InferenceFunctions:
                     (decoding_conf_query_aug.num_return_sequences if not oracle_mode else 1)
                 )
                 queries_per_question = 1
-                all_queries_scores_this_loop = [
-                    None for _ in range(len(all_queries_this_loop))
+                assert query_aug_scores_this_loop is None
+                query_aug_scores_this_loop = [
+                    None for _ in range(len(queries_this_loop))
+                ]
+                assert query_augs_this_loop is None
+                query_augs_this_loop= [
+                    None for _ in range(len(queries_this_loop))
                 ]
             else:
                 effective_batch_size = retriever_batch_size
                 queries_per_question = (
                     decoding_conf_query_aug.num_return_sequences
                 )
-                all_queries_scores_this_loop = (
-                    query_aug_score_all_loops[-1]
+                assert query_aug_scores_this_loop is not None
+                assert query_augs_this_loop is not None
+                utils.check_equal(
+                    len(query_aug_scores_this_loop), 
+                    len(queries_this_loop),
+                )
+                utils.check_equal(
+                    len(query_augs_this_loop), 
+                    len(queries_this_loop),
                 )
 
             # Make sure we have as many scores as we have queries.
             # This should always be true.
             try:
                 utils.check_equal(
-                    len(all_queries_this_loop),
-                    len(all_queries_scores_this_loop),
+                    len(queries_this_loop),
+                    len(query_aug_scores_this_loop),
                 )
 
             except ValueError as err:
                 raise utils.add_to_err(
                     err, (
-                        f"{len(all_queries_this_loop) = }\n"
-                        f"{np.array(all_queries_this_loop).shape = }\n"
-                        f"{len(all_queries_scores_this_loop) = }\n"
-                        f"{np.array(all_queries_scores_this_loop).shape = }\n"
+                        f"{len(queries_this_loop) = }\n"
+                        f"{np.array(queries_this_loop).shape = }\n"
+                        f"{len(query_aug_scores_this_loop) = }\n"
+                        f"{np.array(query_aug_scores_this_loop).shape = }\n"
                         f"{loop_i = }\n"
                     )
                 )
 
-
-            for batch_i, (query_batch, query_scores_batch, query_augs_batch) in enumerate(
+            ###################################################################
+            # Retrieve and Select
+            ###################################################################
+            for batch_i, (
+                query_batch, 
+                query_scores_batch, 
+                query_augs_batch, 
+                questions_batch,
+            ) in enumerate(
                 more_itertools.zip_equal(
                     more_itertools.chunked(
-                        tqdm.tqdm(
-                            all_queries_this_loop,
-                            desc="retrieval all_queries_this_loop",
-                        ),
+                        queries_this_loop,
                         effective_batch_size
                     ),
                     more_itertools.chunked(
-                        all_queries_scores_this_loop,
+                        query_aug_scores_this_loop,
                         effective_batch_size,
                     ),
                     more_itertools.chunked(
-                        all_query_augs_this_loop,
+                        query_augs_this_loop,
+                        effective_batch_size,
+                    ),
+                    more_itertools.chunked(
+                        questions,
                         effective_batch_size,
                     )
                 )
@@ -881,26 +606,19 @@ class InferenceFunctions:
 
                 # Retrieve.
                 if aug_method == "RETRIEVE_ALL_INDIVIDUALLY":
-                    query_batch_np = np.array(
-                        query_batch, dtype="object",
-                    ).reshape(-1)
-                    
                     real_batch_size = len(query_batch)
 
                     # TODO: Make sure the reshaping makes sense
-                    top_ids_and_scores = common_retriever.retrieve(
-                        retriever=retriever,
-                        all_passages=all_passages,
-                        questions=query_batch_np,
-                        special_query_token=special_query_token,
-                        n_docs=n_docs,
-                        retrieval_max_size=retrieval_max_size,
+                    query_batch = np.reshape(query_batch, -1)
+                    top_ids_and_scores = retrieval_client.retrieve(
+                        query_batch
                     )
+                    
 
                     ################################################
                     # Deal with contexts
                     ################################################
-                    top_ids, scores_retr = top_ids_and_scores
+                    top_ids, scores_retr, titles, texts = top_ids_and_scores
                     
                     try:
                         top_ids_np = np.array(top_ids).reshape(
@@ -924,48 +642,63 @@ class InferenceFunctions:
                         )
                         raise err
 
+                    retr_text = []
+                    
+                    ###########################################################
+                    # Prepare the retrieval text
+                    ###########################################################
+                    for batch_ids_per_query in top_ids_np:
+                        retr_text_batch = []
+                        for ids_per_query in batch_ids_per_query:
+                            retr_text_per_query = retrieval_client.get_passages(
+                                ids_per_query
+                            )[1]
+                            retr_text_batch.append(retr_text_per_query)
+                        retr_text.append(retr_text_batch)
 
+                    retr_text = np.array(retr_text, dtype=np.object_)
+                    utils.check_shape(retr_text.shape, top_ids_np.shape)
+
+                    ###########################################################
+                    # Call selection context
+                    ###########################################################
+                    queries_text = np.array(query_batch, dtype=np.object_)
+                    query_aug_text = np.array(query_augs_batch, dtype=np.object_) 
+                    questions_batch = np.array(questions_batch, dtype=np.object_)
+
+                    # Calls a SelectionTechnique.__call__ method.
                     selected_contexts_ids_np = selection_context(
                         top_retr_ids_np=top_ids_np,
                         scores_retr_np=scores_retr_np,
                         final_num_contexts=final_num_contexts,
                         query_scores_batch=np.array(query_scores_batch),
-                        checks_info=SelectionTechniqueChecksInfo(
+                        checks_info=selection_techniques.SelectionTechniqueChecksInfo(
                             batch_size=real_batch_size,
                             num_sequences=queries_per_question,
                             n_docs=n_docs,
                             loop_i=loop_i,
                         ),
-                        is_first_loop=loop_i == 0,
-                        question_text=query_batch,
+                        loop_i=loop_i,
+                        queries_text=queries_text,
+                        question_text=questions_batch,
                         retr_text=retr_text,
-                        query_aug_text=query_augs_batch,   
-                        is_first=batch_i == 0,
+                        query_aug_text=query_aug_text,
                     )
 
-                    utils.check_shape(
-                        selected_contexts_ids_np.shape,
-                        (
-                            real_batch_size,
-                            final_num_contexts
-                        )
+                    utils.check_shape(selected_contexts_ids_np.shape,
+                        (real_batch_size, final_num_contexts)
                     )
-
                     retrieved_this_loop.extend(selected_contexts_ids_np)
 
                 else:
                     raise ValueError(aug_method)
 
                 write_contexts(
-                    all_contexts=all_passages,
+                    retrieval_client=retrieval_client,
                     context_ids=selected_contexts_ids_np.tolist(),
                     out_path=output_paths["retr_outs"],
                 )
-
-        del selected_contexts_ids_np
-        del all_queries_this_loop
-        del all_queries_scores_this_loop
-
+        
         return retrieved_this_loop
 
     @classmethod
@@ -973,13 +706,11 @@ class InferenceFunctions:
         cls,
         *,
         loop_i,
-        query_aug_text_all_loops,
-        query_aug_score_all_loops,
         retrieved_this_loop,
         question_dataloader,
         generation_batch_size,
         tokenizer_bart,
-        all_passages,
+        retrieval_client,
         query_aug_model,
         query_aug_input_max_length,
         decoding_conf_query_aug,
@@ -987,11 +718,9 @@ class InferenceFunctions:
         oracle_mode,
     ):
         LOGGER.info(f"[{loop_i = }] Starting generation.")
-        query_aug_text_all_loops.append([])
-        query_aug_score_all_loops.append([])
+        new_aug_text = []
+        new_aug_score = []
 
-        utils.check_equal(len(query_aug_text_all_loops), loop_i + 1)
-        utils.check_equal(len(query_aug_score_all_loops), loop_i + 1)
         tqdm_info = f"[{loop_i = }] Generating with BART models :: "
         num_batchs_generation = np.ceil(
             len(retrieved_this_loop) / question_dataloader.batch_size
@@ -1014,7 +743,7 @@ class InferenceFunctions:
 
         for batch_i, ((questions_batch, _), context_batch) in enumerate(
             more_itertools.zip_equal(
-                question_generator(
+                batched_question_generator(
                     question_dataloader, 
                     tokenizer_bart, 
                     tqdm_info, 
@@ -1054,10 +783,7 @@ class InferenceFunctions:
                 questions_batch,
                 context_batch,
             ):
-                contexts = [
-                    all_passages[ids_].text
-                    for ids_ in selected_ids
-                ]
+                contexts = retrieval_client.get_passages(selected_ids)[1]
 
                 generation_input = (
                     question + tokenizer_bart.sep_token +
@@ -1133,15 +859,8 @@ class InferenceFunctions:
                     texts_per_question.append(cleaned)
                 query_aug_text_batch.append(texts_per_question)
 
-            assert len(query_aug_text_all_loops) == loop_i + 1, (
-                len(query_aug_text_all_loops), loop_i + 1
-            )
-            assert len(query_aug_score_all_loops) == loop_i + 1, (
-                len(query_aug_score_all_loops), loop_i + 1
-            )
-
             query_aug_text_batch = np.array(
-                query_aug_text_batch, dtype="object"
+                query_aug_text_batch, dtype=np.object_
             )
 
             # Make sure that query_aug_text_batch are of the expected shape
@@ -1160,14 +879,10 @@ class InferenceFunctions:
             )
 
             # Accumulate the query augmentation text by loop
-            query_aug_text_all_loops[loop_i].extend(
-                query_aug_text_batch
-            )
+            new_aug_text.extend(query_aug_text_batch)
 
             # Accumulate the query auggmentation generation score per loop
-            query_aug_score_all_loops[loop_i].extend(
-                query_aug_scores_batch
-            )
+            new_aug_score.extend(query_aug_scores_batch)
 
             ###############################################################
             # READER INFERENCE
@@ -1216,18 +931,16 @@ class InferenceFunctions:
                 output_paths["gen_inputs"],
             )
 
-        return query_aug_text_all_loops, query_aug_score_all_loops
+        return new_aug_text, new_aug_score
 
 ###############################################################################
 # Inference
 ###############################################################################
 # @beartype.beartype
 def inference(
-    all_passages: Dict[str, str],
+    retrieval_client,
     query_aug_model: train_generator.SummarizationTrainer,
     reader_model: Optional[train_generator.SummarizationTrainer],
-    special_query_token: Optional[str],
-    retriever: dense_retriever.LocalFaissRetriever,
     question_dataloader: torch.utils.data.DataLoader,
     max_loop_n: int,
     decoding_conf_reader,
@@ -1246,13 +959,15 @@ def inference(
     oracle_mode: bool,
     retrieval_max_size: int,
 ) -> None:
+    """High level inference function.
+    """
 
-    selection_context = SELECTION_TECHNIQUE_TYPES[selection_mode]()
+    selection_context = selection_techniques.SELECTION_TECHNIQUE_TYPES[selection_mode]()
 
     out_path = Path(out_path)
 
     if oracle_mode:
-        assert max_loop_n == 1, max_loop_n
+        utils.check_equal(max_loop_n, 1)
 
     # Prepare the output files
     prefixes = dict(
@@ -1279,6 +994,15 @@ def inference(
             for name, prefix in prefixes.items():
                 output_paths[name] = out_path / f"{prefix}{loop_i}.jsonl"
 
+            if loop_i > 0:
+                utils.check_equal(len(query_aug_score_all_loops), loop_i)
+                utils.check_equal(len(query_aug_text_all_loops), loop_i)
+                current_query_aug_scores = query_aug_score_all_loops[-1] 
+                current_query_augs = query_aug_text_all_loops[-1]
+            else:
+                current_query_aug_scores = None
+                current_query_augs = None
+
             ###################################################################
             # PREPARE THE RETRIEVAL QUERIES
             ###################################################################
@@ -1286,33 +1010,38 @@ def inference(
                 question_dataloader=question_dataloader, 
                 tokenizer_bart=tokenizer_bart, 
                 loop_i=loop_i, 
-                query_aug_text_all_loops=query_aug_text_all_loops, 
-                query_aug_score_all_loops=query_aug_score_all_loops, 
-                aug_method=aug_method, decoding_conf_query_aug=decoding_conf_query_aug, 
+                current_query_augs=current_query_augs, 
+                current_query_aug_scores=current_query_aug_scores, 
+                aug_method=aug_method, 
+                decoding_conf_query_aug=decoding_conf_query_aug, 
                 augmentation_mode=augmentation_mode, 
                 tokenizer_bert=tokenizer_bert, 
                 output_paths=output_paths,
                 oracle_mode=oracle_mode,
             )
-            
 
             ###################################################################
             # RETRIEVE
             ###################################################################
+            questions_generator = individual_question_generator(
+                question_dataloader,
+                tokenizer_bart,
+                f"[{loop_i = }] retrieving :: ",
+                oracle_mode=oracle_mode,
+            )
+
             retrieved_this_loop = InferenceFunctions.retrieve(
                 loop_i=loop_i,
                 retriever_batch_size=retriever_batch_size,
                 decoding_conf_query_aug=decoding_conf_query_aug,
-                all_queries_this_loop=all_queries_this_loop,
-                all_query_augs_this_loop=query_aug_text_all_loops[loop_i],
-                query_aug_score_all_loops=query_aug_score_all_loops,  # This is weird
+                queries_this_loop=all_queries_this_loop,
+                questions=questions_generator,
+                query_augs_this_loop=current_query_augs,
+                query_aug_scores_this_loop=current_query_aug_scores,  
                 aug_method=aug_method,
-                retriever=retriever,
-                all_passages=all_passages,
-                special_query_token=special_query_token,
+                retrieval_client=retrieval_client,
                 n_docs=n_docs,
                 final_num_contexts=final_num_contexts,
-                selection_mode=selection_mode,
                 output_paths=output_paths,
                 selection_context=selection_context,
                 oracle_mode=oracle_mode,
@@ -1326,21 +1055,22 @@ def inference(
             # Generation with the Barts.
             ###################################################################
             # Splitting per bart model would maybe be better.
-            query_aug_text_all_loops, query_aug_score_all_loops = InferenceFunctions.generate(
+            new_aug_text, new_aug_score = InferenceFunctions.generate(
                 loop_i=loop_i,
-                query_aug_text_all_loops=query_aug_text_all_loops,
-                query_aug_score_all_loops=query_aug_score_all_loops,
                 retrieved_this_loop=retrieved_this_loop,
                 question_dataloader=question_dataloader,
                 generation_batch_size=generation_batch_size,
                 tokenizer_bart=tokenizer_bart,
-                all_passages=all_passages,
+                retrieval_client=retrieval_client,
                 query_aug_model=query_aug_model,
                 query_aug_input_max_length=query_aug_input_max_length,
                 decoding_conf_query_aug=decoding_conf_query_aug,
                 output_paths=output_paths,
                 oracle_mode=oracle_mode,
             )
+
+            query_aug_text_all_loops.append(new_aug_text)
+            query_aug_score_all_loops.append(new_aug_score)
 
 
 def build_args(
@@ -1349,21 +1079,22 @@ def build_args(
     run_name: str,
     apply_file_modifications: bool = True,
 ):
-    config_path = Path(config_path)
-    root_path = Path(root_path)
-    config = utils.load_json(config_path)
+    config_path: Final = Path(config_path)
+    root_path: Final = Path(root_path)
+    config: Final = utils.load_json(config_path)
+
     LOGGER.info(f"Loaded config from {config_path}")
 
-    RUN_NAME = run_name
-    ORACLE_MODE = config.pop("oracle_mode", False)
+    RUN_NAME: Final = run_name
+    ORACLE_MODE: Final = config.pop("oracle_mode", False)
     # A lot of stuff because unnecessary if `oracle_mode` is on.
-    DATALOADER_MAX_SOURCE_LEN = config.pop("dataloader_max_source_len")
-    FINAL_NUM_CONTEXTS = config.pop("final_num_contexts")
-    N_DOCS = config.pop("n_docs")
+    DATALOADER_MAX_SOURCE_LEN: Final = config.pop("dataloader_max_source_len")
+    FINAL_NUM_CONTEXTS: Final = config.pop("final_num_contexts")
+    N_DOCS: Final = config.pop("n_docs")
     
-    SELECTION_MODE = config.pop("selection_mode")
-    AUGMENTATION_MODE = config.pop("augmentation_mode")
-    QUERY_AUG_MODEL_TYPE = config.pop("query_aug_model_type")
+    SELECTION_MODE: Final = config.pop("selection_mode")
+    AUGMENTATION_MODE: Final = config.pop("augmentation_mode")
+    QUERY_AUG_MODEL_TYPE: Final = config.pop("query_aug_model_type")
 
     if ORACLE_MODE:
         MAX_LOOP_N = 1
@@ -1377,17 +1108,17 @@ def build_args(
     ###############################################################################
     # Likely fixed
     ###############################################################################
-    RETRIEVAL_MAX_SIZE = 15
+    RETRIEVAL_MAX_SIZE: Final = 15
     
-    SENTENCE_DATA_DIR = root_path / "GAR" / "data" / "nq-sentence"
-    SENTENCE_MODEL = root_path / "GAR/gar/outputs/sentence_with_context/epoch=38-step=3080.ckpt"
-    ANSWER_DATA_DIR = root_path / "GAR" / "data" / "nq-answer"
-    ANSWER_MODEL = root_path / "GAR/gar/outputs/answer_with_context_1/epoch=17-step=1421.ckpt"
+    SENTENCE_DATA_DIR: Final = root_path / "GAR" / "data" / "nq-sentence"
+    SENTENCE_MODEL: Final = root_path / "GAR" / "gar" / "outputs" / "sentence_with_context"/ "epoch=38-step=3080.ckpt"
+    ANSWER_DATA_DIR: Final = root_path / "GAR" / "data" / "nq-answer"
+    ANSWER_MODEL: Final = root_path / "GAR" / "gar" / "outputs" / "answer_with_context_1" / "epoch=17-step=1421.ckpt"
     
-    RETRIEVER_BATCH_SIZE = math.ceil(15 / FINAL_NUM_CONTEXTS)
-    MAX_SOURCE_LEN = 768
-    QUERY_AUG_INPUT_MAX_LEN = 768
-    GENERATION_BATCH_SIZE = 5
+    RETRIEVER_BATCH_SIZE: Final = math.ceil(15 / FINAL_NUM_CONTEXTS)
+    MAX_SOURCE_LEN: Final = 768
+    QUERY_AUG_INPUT_MAX_LEN: Final = 768
+    GENERATION_BATCH_SIZE: Final = 5
 
     if ORACLE_MODE:
         DATALOADER_MAX_TARGET_LEN = 30
@@ -1430,11 +1161,11 @@ def build_args(
     ###############################################################################
     # Fixed config
     ###############################################################################
-    CV_SET = "val"
-    DPR_CONF_PATH = root_path / "DPR" / "conf"
-    OUTPUT_ROOT = root_path / "jobs" / "retrieve_and_decode" / "iterated_decoding_output"
+    CV_SET: Final = "val"
+    DPR_CONF_PATH: Final = root_path / "DPR" / "conf"
+    OUTPUT_ROOT: Final = root_path / "jobs" / "retrieve_and_decode" / "iterated_decoding_output"
     assert OUTPUT_ROOT.exists(), OUTPUT_ROOT
-    out_path = OUTPUT_ROOT / f"{utils.timestamp()}_{RUN_NAME}"
+    out_path: Final = OUTPUT_ROOT / f"{utils.timestamp()}_{RUN_NAME}"
 
     ###############################################################################
     # Fixed logic
@@ -1455,7 +1186,7 @@ def build_args(
     assert ANSWER_DATA_DIR.exists(), ANSWER_DATA_DIR
     assert SENTENCE_DATA_DIR.exists(), SENTENCE_DATA_DIR
 
-    AUG_METHOD = "RETRIEVE_ALL_INDIVIDUALLY"
+    AUG_METHOD: Final = "RETRIEVE_ALL_INDIVIDUALLY"
 
     dpr_cfg = common_retriever.build_cfg(str(DPR_CONF_PATH))
 
@@ -1489,7 +1220,7 @@ def build_args(
             shutil.rmtree(out_path)
         out_path.mkdir()
 
-        json_output_config = dict(
+        json_output_config: Final = dict(
             indent=2,
         )
 
@@ -1514,8 +1245,8 @@ def build_args(
 
 
 if __name__ == "__main__":
-    ROOT_PATH = Path("/home/mila/g/gagnonju/IteratedDecoding/")
-    args, dpr_cfg = build_args(ROOT_PATH, apply_file_modifications=False)
+    test_root = Path("/home/mila/g/gagnonju/IteratedDecoding/")
+    args, dpr_cfg = build_args(test_root, apply_file_modifications=False)
     def default(obj):
         if isinstance(obj, Path):
             return str(obj)

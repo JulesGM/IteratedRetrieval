@@ -26,7 +26,7 @@ from typing import *
 SCRIPT_DIR = Path(__file__).absolute().parent
 
 # Third party
-import faiss
+import faiss  # type: ignore
 import hydra
 import numpy as np
 import omegaconf
@@ -42,14 +42,14 @@ DPR_PATH = ROOT_PATH  / "DPR"
 CONF_PATH = DPR_PATH / "conf"
 sys.path.insert(0, str(DPR_PATH))
 
-import dpr.options
-import dpr.utils.model_utils
-import dpr.indexer.faiss_indexers
-import dense_retriever
+import dpr.options  # type: ignore
+import dpr.utils.model_utils  # type: ignore
+import dpr.indexer.faiss_indexers  # type: ignore
+import dense_retriever  # type: ignore
 print(dense_retriever.__file__)
 
 
-import jules_validate_dense_retriever
+import jules_validate_dense_retriever  # type: ignore
 # sys.path.insert(0, str(ROOT_PATH / "GAR" / "gar"))
 # import utils_gen
 
@@ -212,8 +212,6 @@ def load_passages(cfg):
 # Build the retriever
 ###########################################################
 def make_retriever(cfg, id_prefixes):
-    
-
     cfg = copy.copy(cfg)
     prep_cfg(cfg)
 
@@ -389,7 +387,8 @@ def retrieve(
     assert retrieval_max_size == 15, (retrieval_max_size,)
     top_ids_and_scores = []
     for batch in utils.tensor_chunked(questions_tensor, retrieval_max_size):
-        
+        batch: torch.Tensor
+
         top_ids_and_scores_batch = retriever.get_top_docs(
             batch.numpy(),
             n_docs,
@@ -431,16 +430,16 @@ def build_retriever(cfg, caching_directory: Path) -> Tuple[dense_retriever.Local
                     cfg,
                 )
             with utils.time_this("common_retriever.build_retriever save passages"):
-                with open(caching_directory / "all_passages.pkl", "wb") as f:
-                    pickle.dump(all_passages, f)
-                with open(caching_directory / "id_prefixes.json", "w") as f:
-                    json.dump(id_prefixes, f)
+                with open(caching_directory / "all_passages.pkl", "wb") as f_bin:
+                    pickle.dump(all_passages, f_bin)
+                with open(caching_directory / "id_prefixes.json", "w") as f_text:
+                    json.dump(id_prefixes, f_text)
         else:
             with utils.time_this("common_retriever.build_retriever load passages"):
-                with open(caching_directory / "all_passages.pkl", "rb") as f:
-                    all_passages = pickle.load(f)
-                with open(caching_directory / "id_prefixes.json", "r") as f:
-                    id_prefixes = json.load(f)
+                with open(caching_directory / "all_passages.pkl", "rb") as f_bin:
+                    all_passages = pickle.load(f_bin)
+                with open(caching_directory / "id_prefixes.json", "r") as f_text:
+                    id_prefixes = json.load(f_text)
     else:
         with utils.time_this("common_retriever.load_passages (~6 min)"):
             all_passages, id_prefixes = load_passages(
